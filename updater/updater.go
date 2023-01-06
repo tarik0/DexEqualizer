@@ -16,7 +16,7 @@ import (
 
 var MaxProcessAmount = 500
 var MaxHops = 3
-var MaxCircleResults = 2000
+var MaxCircleResults = 2500
 
 type SyncCallback func(updateTime time.Duration, sortTime time.Duration, u *PairUpdater)
 

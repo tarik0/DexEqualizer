@@ -20,3 +20,9 @@ type RankReq struct {
 type MessageReq struct {
 	Message string `json:"Message"`
 }
+
+// HistoryReq
+//	A struct for message histories.
+type HistoryReq struct {
+	Messages []MessageReq `json:"Messages"`
+}

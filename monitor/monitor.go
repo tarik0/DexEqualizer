@@ -1,17 +1,13 @@
 package monitor
 
 import (
-	"flag"
 	"net/http"
 )
 
-var addr = flag.String("Webserver Address", "localhost:8080", "Dex Equalizer Webserver")
-
-// StartWebserver
+// SetWebHandler
 //	Starts new web server.
-func StartWebserver() {
+func SetWebHandler() {
 	http.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
 		http.ServeFile(writer, request, "./monitor/static/index.html")
 	})
-	http.ListenAndServe(*addr, nil)
 }

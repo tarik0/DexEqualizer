@@ -31,7 +31,7 @@ func (t *TradeOption) GetProfit() (*big.Int, error) {
 	)
 
 	// Calculate loan debt.
-	/*loanDebt := new(big.Int).Mul(
+	loanDebt := new(big.Int).Mul(
 		new(big.Int).Sub(variables.Big10000, t.Circle.PairFees[0]),
 		t.AmountsOut[0],
 	)
@@ -39,10 +39,6 @@ func (t *TradeOption) GetProfit() (*big.Int, error) {
 
 	// Subs profit.
 	return profit.Sub(profit, loanDebt), nil
-	*/
-
-	// Subs profit.
-	return profit, nil
 }
 
 // TriggerLimit returns the trigger limit.

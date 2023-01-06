@@ -3,6 +3,7 @@ package updater
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -328,6 +329,9 @@ func (p *PairUpdater) findReserves() error {
 		Err       error
 	})
 
+	// TODO: remove
+	var shit int32 = 0
+
 	// Start workers.
 	for chunkId := 0; chunkId < len(contractAddressesChunks); chunkId++ {
 		// The chunks.
@@ -368,12 +372,16 @@ func (p *PairUpdater) findReserves() error {
 			var pairAddrs = make([]common.Address, len(returnBytes))
 			for k, addrBytes := range returnBytes {
 				// Check if empty.
+
 				for _, v := range addrBytes {
-					if v != 0 {
+					if v != 0 && contractAddressesChunk[k].String() != "0x0000000000000000000000000000000000000000" {
 						pairAddrs[k] = contractAddressesChunk[k]
 						pairReserves[k] = make([]*big.Int, 2)
 						pairReserves[k][0] = new(big.Int).SetBytes(addrBytes[0:32])
 						pairReserves[k][1] = new(big.Int).SetBytes(addrBytes[32:64])
+
+						atomic.AddInt32(&shit, 1)
+						logger.Log.Infoln(fmt.Sprintf("[%d/%d] %s | %s, %s", atomic.LoadInt32(&shit), len(p.Pairs), pairAddrs[k].String(), pairReserves[k][0].String(), pairReserves[k][1].String()))
 						break
 					}
 				}
@@ -399,6 +407,9 @@ func (p *PairUpdater) findReserves() error {
 			return r.Err
 		}
 		for i, addr := range r.Addresses {
+			if len(r.Reserves[i]) != 2 || r.Addresses[i].String() == "0x0000000000000000000000000000000000000000" {
+				continue
+			}
 			p.AddressToPair[addr].SetReserves(r.Reserves[i][0], r.Reserves[i][1])
 		}
 	}

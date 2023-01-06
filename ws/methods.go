@@ -2,34 +2,50 @@ package ws
 
 import (
 	"encoding/json"
-	"flag"
-	"github.com/gorilla/websocket"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/logger"
 	"net/http"
-	"sync"
 )
 
-var addr = flag.String("Web Socket Address", "localhost:8081", "Dex Equalizer WebSocket")
-
-// Start
-//	Starts the server.
-func (ws *RankWebsocket) Start() error {
-	http.HandleFunc("/dex_eq", ws.UpgradeRequest)
-	return http.ListenAndServe(*addr, nil)
+// Run
+//	Starts the hub.
+func (h *Hub) Run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.clients[client] = true
+		case client := <-h.unregister:
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				close(client.send)
+			}
+		case message := <-h.Broadcast:
+			for client := range h.clients {
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
+					delete(h.clients, client)
+				}
+			}
+		}
+	}
 }
 
-// UpgradeRequest
-//	Upgrades the requests and adds writer to the collection.
-func (ws *RankWebsocket) UpgradeRequest(w http.ResponseWriter, r *http.Request) {
-	// Upgrade connection.
-	c, err := ws.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to upgrade request.")
-	}
+// SetHandler
+//	Sets handler for the websocket.
+func (h *Hub) SetHandler() {
+	http.HandleFunc("/dex_eq", func(w http.ResponseWriter, r *http.Request) {
+		client := serveWs(h, w, r)
+		h.sendHello(client)
+	})
+}
 
+// sendHello
+//	Sends `History` and `Rank` packets to the new client.
+func (h *Hub) sendHello(newClient *Client) {
 	// Get trade options.
-	options := ws.updater.GetSortedTrades()
+	options := h.updater.GetSortedTrades()
 	if options == nil {
 		return
 	}
@@ -43,11 +59,18 @@ func (ws *RankWebsocket) UpgradeRequest(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Append to connections.
-	ws.connectionMutexes[c] = &sync.RWMutex{}
-	ws.connections = append(ws.connections, c)
+	// Marshall history.
+	historyBytes, err := json.Marshal(WebsocketReq{
+		Type: "History",
+		Data: HistoryReq{
+			Messages: h.history,
+		},
+	})
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to marshal history.")
+	}
 
-	// Marshall.
+	// Marshall rank.
 	rankBytes, err := json.Marshal(WebsocketReq{
 		Type: "Rank",
 		Data: RankReq{
@@ -57,23 +80,20 @@ func (ws *RankWebsocket) UpgradeRequest(w http.ResponseWriter, r *http.Request) 
 		},
 	})
 	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to marshal trade.")
+		logger.Log.WithError(err).Fatalln("Unable to marshal rank.")
 	}
 
 	// Broadcast
-	ws.Broadcast(rankBytes)
+	newClient.send <- historyBytes
+	newClient.send <- rankBytes
 }
 
-// Broadcast
-//	Sends infos to all connections.
-func (ws *RankWebsocket) Broadcast(str []byte) {
-	for i, con := range ws.connections {
-		ws.connectionMutexes[con].Lock()
-		err := con.WriteMessage(websocket.TextMessage, str)
-		ws.connectionMutexes[con].Unlock()
-		if err != nil {
-			delete(ws.connectionMutexes, con)
-			ws.connections = append(ws.connections[:i], ws.connections[i+1:]...)
-		}
-	}
+// AddToHistory
+//	Adds message to the history.
+func (h *Hub) AddToHistory(str MessageReq) {
+	logger.Log.Infoln(str.Message)
+
+	h.historyMutex.Lock()
+	h.history = append(h.history, str)
+	h.historyMutex.Unlock()
 }

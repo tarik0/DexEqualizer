@@ -7,7 +7,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/gosuri/uilive"
+	_ "github.com/gosuri/uilive"
 	"github.com/tarik0/DexEqualizer/addresses"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
@@ -18,14 +18,15 @@ import (
 	"github.com/tarik0/DexEqualizer/variables"
 	"github.com/tarik0/DexEqualizer/ws"
 	"math/big"
+	"net/http"
 	"os"
-	"sync"
+	_ "sync"
 	"time"
 )
 
-var writer = uilive.New()
-var writerMutex = &sync.RWMutex{}
-var wsServer *ws.RankWebsocket
+// The webserver hub.
+
+var hub *ws.Hub
 
 func main() {
 	// The rpc.
@@ -109,8 +110,13 @@ func main() {
 	logger.Log.Infoln("  Flashloan Executor:", config.Parsed.Contracts.Flashloan)
 	logger.Log.Infoln("")
 
+	// Start web server.
+	monitor.SetWebHandler()
+
 	// New websocket server.
-	wsServer = ws.NewRankWebsocket(u)
+	hub = ws.NewHub(u)
+	hub.SetHandler()
+	go hub.Run()
 
 	// Set onSync.
 	u.OnSync = onSync
@@ -123,17 +129,11 @@ func main() {
 		logger.Log.WithError(err).Fatalln("Unable to generate new updater.")
 	}
 
-	// Start web server.
-	go monitor.StartWebserver()
-
 	logger.Log.Infoln("")
-	logger.Log.Infoln("Monitor server started at \"http://localhost:8080\"!")
+	logger.Log.Infoln("Monitor server started at \"http://0.0.0.0:8080\"!")
 
-	// Start server.
-	err = wsServer.Start()
-	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to start the websocket server.")
-	}
+	// Start web server.
+	logger.Log.Fatalln(http.ListenAndServe(":8080", nil))
 }
 
 // onSync gets triggered on new sync event.
@@ -141,6 +141,11 @@ func onSync(updateTime time.Duration, sortTime time.Duration, u *updater.PairUpd
 	// Get trade options.
 	options := u.GetSortedTrades()
 	if options == nil {
+		return
+	}
+
+	// Skip if no trades.
+	if len(options) == 0 {
 		return
 	}
 
@@ -169,7 +174,7 @@ func onSync(updateTime time.Duration, sortTime time.Duration, u *updater.PairUpd
 		}
 
 		// Broadcast
-		wsServer.Broadcast(rankBytes)
+		hub.Broadcast <- rankBytes
 	}()
 
 	// Check if profitable.
@@ -182,22 +187,26 @@ func onSync(updateTime time.Duration, sortTime time.Duration, u *updater.PairUpd
 	// Broadcast buy.
 	go func() {
 		// Marshall.
+		msg := ws.MessageReq{
+			Message: fmt.Sprintf(
+				"%s circle has passed the trigger limit of %.5f WBNB! (%.5f WBNB)",
+				options[0].Circle.SymbolsStr(),
+				utils.WeiToEthers(triggerLim),
+				utils.WeiToEthers(profit),
+			),
+		}
 		messageBytes, err := json.Marshal(ws.WebsocketReq{
 			Type: "Message",
-			Data: ws.MessageReq{
-				Message: fmt.Sprintf(
-					"%s circle has passed the trigger limit of %.5f WBNB! (%.5f WBNB)",
-					options[0].Circle.SymbolsStr(),
-					utils.WeiToEthers(triggerLim),
-					utils.WeiToEthers(profit),
-				),
-			},
+			Data: msg,
 		})
 		if err != nil {
 			logger.Log.WithError(err).Fatalln("Unable to marshal message trade.")
 		}
 
+		// Add to history.
+		hub.AddToHistory(msg)
+
 		// Broadcast
-		wsServer.Broadcast(messageBytes)
+		hub.Broadcast <- messageBytes
 	}()
 }
