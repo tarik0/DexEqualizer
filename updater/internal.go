@@ -3,7 +3,6 @@ package updater
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -329,9 +328,6 @@ func (p *PairUpdater) findReserves() error {
 		Err       error
 	})
 
-	// TODO: remove
-	var shit int32 = 0
-
 	// Start workers.
 	for chunkId := 0; chunkId < len(contractAddressesChunks); chunkId++ {
 		// The chunks.
@@ -380,8 +376,8 @@ func (p *PairUpdater) findReserves() error {
 						pairReserves[k][0] = new(big.Int).SetBytes(addrBytes[0:32])
 						pairReserves[k][1] = new(big.Int).SetBytes(addrBytes[32:64])
 
-						atomic.AddInt32(&shit, 1)
-						logger.Log.Infoln(fmt.Sprintf("[%d/%d] %s | %s, %s", atomic.LoadInt32(&shit), len(p.Pairs), pairAddrs[k].String(), pairReserves[k][0].String(), pairReserves[k][1].String()))
+						// atomic.AddInt32(&shit, 1)
+						// logger.Log.Infoln(fmt.Sprintf("[%d/%d] %s | %s, %s", atomic.LoadInt32(&shit), len(p.Pairs), pairAddrs[k].String(), pairReserves[k][0].String(), pairReserves[k][1].String()))
 						break
 					}
 				}
@@ -493,6 +489,7 @@ func (p *PairUpdater) findCircles() error {
 		Route:          make([]common.Address, 0),
 		RouteFees:      make([]*big.Int, 0),
 		RouteTokens:    make([][]common.Address, 0),
+		RouteReserves:  make([][]*big.Int, 0),
 	}
 
 	// Wait group.
@@ -516,9 +513,12 @@ func (p *PairUpdater) findCircles() error {
 // sortCircles
 //	Sorts DFS circles.
 func (p *PairUpdater) sortCircles() {
-	p.sortMutex.Lock()
-	p.sortedTrades = p.quickSortCircles()
-	p.sortMutex.Unlock()
+	tmp := time.Now()
+	sortedTrades := p.quickSortCircles()
+	sortTime := time.Since(tmp)
+
+	p.sortTime.Swap(sortTime)
+	p.sortedTrades.Swap(sortedTrades)
 }
 
 // subscribeToSync
@@ -540,11 +540,24 @@ func (p *PairUpdater) subscribeToSync() {
 	}
 }
 
+// subscribeToHeads
+//	Subscribes to the new blocks.
+func (p *PairUpdater) subscribeToHeads() {
+	// Make new channel.
+	p.blocksCh = make(chan *types.Header)
+
+	// Subscribe to the new blocks.
+	var err error
+	p.blocksSub, err = variables.EthClient.SubscribeNewHead(context.Background(), p.blocksCh)
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to subscribe to the new blocks.")
+	}
+}
+
 // listenSync
 //	Listens new events.
 func (p *PairUpdater) listenSync(vLog types.Log) {
 	// Iterate over logs.
-	startTime := time.Now()
 	for _, log := range vLog.Topics {
 		// Continue if topic is not sync.
 		if !bytes.Equal(syncId.Bytes(), log.Bytes()) {
@@ -562,16 +575,20 @@ func (p *PairUpdater) listenSync(vLog types.Log) {
 		resA, resB := syncDetails[0].(*big.Int), syncDetails[1].(*big.Int)
 		p.AddressToPair[vLog.Address].SetReserves(resA, resB)
 	}
-	updateElapsed := time.Since(startTime)
+}
 
-	// Sort again.
-	startTime = time.Now()
+// listenBlocks
+//	Listens new blocks.
+func (p *PairUpdater) listenBlocks(header *types.Header) {
+	// Sort the circles.
 	p.sortCircles()
-	sortElapsed := time.Since(startTime)
 
-	// Run callback.
-	if p.OnSync != nil {
-		go p.OnSync(updateElapsed, sortElapsed, p)
+	// Update block number.
+	p.lastBlockNum.Swap(header.Number.Uint64())
+
+	// Trigger event.
+	if p.OnSort != nil {
+		p.OnSort(header, p)
 	}
 }
 
@@ -705,6 +722,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 			newRoute := make([]common.Address, len(params.Route))
 			newRouteFees := make([]*big.Int, len(params.Route))
 			newRouteTokens := make([][]common.Address, len(params.Route))
+			newRouteReserves := make([][]*big.Int, len(params.Route))
 
 			// Copy old variables.
 			copy(newPath, params.Path)
@@ -712,6 +730,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 			copy(newRoute, params.Route)
 			copy(newRouteFees, params.RouteFees)
 			copy(newRouteTokens, params.RouteTokens)
+			copy(newRouteReserves, params.RouteReserves)
 
 			// Append new variables.
 			newPath = append(newPath, tempOutToken)
@@ -719,6 +738,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 			newRouteFees = append(newRouteFees, routeFee)
 			newRoute = append(newRoute, _pair.Address)
 			newRouteTokens = append(newRouteTokens, pairTokens)
+			newRouteReserves = append(newRouteReserves, []*big.Int{_pair.ReserveA, _pair.ReserveB})
 
 			// Get route as structs.
 			tmpPairs := make([]*dexpair.DexPair, len(newRoute))
@@ -734,6 +754,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 				PairAddresses: newRoute,
 				PairFees:      newRouteFees,
 				PairTokens:    newRouteTokens,
+				PairReserves:  newRouteReserves,
 			}
 
 			// Append to channel.
@@ -769,18 +790,21 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 				Route:          make([]common.Address, len(params.Route)),
 				RouteFees:      make([]*big.Int, len(params.Route)),
 				RouteTokens:    make([][]common.Address, len(params.Route)),
+				RouteReserves:  make([][]*big.Int, len(params.Route)),
 			}
 			copy(newParams.Path, params.Path)
 			copy(newParams.Symbols, params.Symbols)
 			copy(newParams.Route, params.Route)
 			copy(newParams.RouteFees, params.RouteFees)
 			copy(newParams.RouteTokens, params.RouteTokens)
+			copy(newParams.RouteReserves, params.RouteReserves)
 
 			newParams.Path = append(newParams.Path, tempOutToken)
 			newParams.Symbols = append(newParams.Symbols, tempOutSymbol)
 			newParams.Route = append(params.Route, _pair.Address)
 			newParams.RouteFees = append(params.RouteFees, routeFee)
 			newParams.RouteTokens = append(params.RouteTokens, pairTokens)
+			newParams.RouteReserves = append(newParams.RouteReserves, []*big.Int{_pair.ReserveA, _pair.ReserveB})
 
 			// Recursive
 			wg.Add(1)

@@ -10,15 +10,16 @@ type WebsocketReq struct {
 // RankReq
 // 	A struct for Rank request.
 type RankReq struct {
-	Circles    interface{} `json:"Circles"`
-	SortTime   int64       `json:"SortTime"`   // in ms
-	UpdateTime int64       `json:"UpdateTime"` // in ms
+	Circles     interface{} `json:"Circles"`
+	SortTime    int64       `json:"SortTime"`    // in ms
+	BlockNumber uint64      `json:"BlockNumber"` // in ms
 }
 
 // MessageReq
 //	A struct for Message request.
 type MessageReq struct {
-	Message string `json:"Message"`
+	Timestamp int64  `json:"Timestamp"`
+	Message   string `json:"Message"`
 }
 
 // HistoryReq

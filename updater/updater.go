@@ -8,17 +8,16 @@ import (
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/dexpair"
 	"math/big"
-	"sync"
-	"time"
+	"sync/atomic"
 )
 
 // Config variables.
 
-var MaxProcessAmount = 500
+var MaxProcessAmount = 750
 var MaxHops = 3
-var MaxCircleResults = 2500
+var MaxCircleResults = 10000
 
-type SyncCallback func(updateTime time.Duration, sortTime time.Duration, u *PairUpdater)
+type OnSortCallback func(header *types.Header, u *PairUpdater)
 
 // PairUpdater
 //	A system that checks pair reserves for arbitrage options.
@@ -45,15 +44,24 @@ type PairUpdater struct {
 	Circles   map[uint64]*circle.Circle
 
 	// The callbacks.
-	OnSync SyncCallback
+	OnSort OnSortCallback
+
+	// Channels.
+	logsCh   chan types.Log
+	blocksCh chan *types.Header
+
+	// Subscriptions
+	logsSub   ethereum.Subscription
+	blocksSub ethereum.Subscription
+
+	// Atomic variables.
+	lastBlockNum atomic.Value
+	sortedTrades atomic.Value
+	sortTime     atomic.Value
 
 	// Other variables.
-	params       *PairUpdaterParams
-	backend      *ethclient.Client
-	sortedTrades []*circle.TradeOption
-	logsCh       chan types.Log
-	logsSub      ethereum.Subscription
-	sortMutex    *sync.RWMutex
+	params  *PairUpdaterParams
+	backend *ethclient.Client
 }
 
 // PairUpdaterParams
@@ -90,6 +98,7 @@ type DFSCircleParams struct {
 	Route          []common.Address
 	RouteFees      []*big.Int
 	RouteTokens    [][]common.Address
+	RouteReserves  [][]*big.Int
 }
 
 // NewPairUpdater
@@ -98,7 +107,5 @@ func NewPairUpdater(params *PairUpdaterParams, backend *ethclient.Client) *PairU
 	return &PairUpdater{
 		params:  params,
 		backend: backend,
-
-		sortMutex: &sync.RWMutex{},
 	}
 }

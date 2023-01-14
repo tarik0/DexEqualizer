@@ -1,10 +1,12 @@
 package ws
 
 import (
+	"bytes"
 	"encoding/json"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/logger"
 	"net/http"
+	"time"
 )
 
 // Run
@@ -59,8 +61,13 @@ func (h *Hub) sendHello(newClient *Client) {
 		}
 	}
 
+	// Encoder.
+	var buff = new(bytes.Buffer)
+	e := json.NewEncoder(buff)
+	e.SetEscapeHTML(true)
+
 	// Marshall history.
-	historyBytes, err := json.Marshal(WebsocketReq{
+	err := e.Encode(WebsocketReq{
 		Type: "History",
 		Data: HistoryReq{
 			Messages: h.history,
@@ -70,13 +77,24 @@ func (h *Hub) sendHello(newClient *Client) {
 		logger.Log.WithError(err).Fatalln("Unable to marshal history.")
 	}
 
+	// Broadcast
+	newClient.send <- buff.Bytes()
+
+	// Get block numbers.
+	blockNum := h.updater.GetBlockNumber()
+
+	// Empty buffer.
+	buff = new(bytes.Buffer)
+	e = json.NewEncoder(buff)
+	e.SetEscapeHTML(true)
+
 	// Marshall rank.
-	rankBytes, err := json.Marshal(WebsocketReq{
+	err = e.Encode(WebsocketReq{
 		Type: "Rank",
 		Data: RankReq{
-			Circles:    tradesJson,
-			SortTime:   0,
-			UpdateTime: 0,
+			Circles:     tradesJson,
+			SortTime:    h.updater.GetSortTime().Milliseconds(),
+			BlockNumber: blockNum,
 		},
 	})
 	if err != nil {
@@ -84,8 +102,7 @@ func (h *Hub) sendHello(newClient *Client) {
 	}
 
 	// Broadcast
-	newClient.send <- historyBytes
-	newClient.send <- rankBytes
+	newClient.send <- buff.Bytes()
 }
 
 // AddToHistory
@@ -96,4 +113,16 @@ func (h *Hub) AddToHistory(str MessageReq) {
 	h.historyMutex.Lock()
 	h.history = append(h.history, str)
 	h.historyMutex.Unlock()
+}
+
+// ClearHistory
+//	A goroutine to clear the history periodically.
+func (h *Hub) ClearHistory() {
+	for {
+		time.Sleep(historyCleanInterval)
+
+		h.historyMutex.Lock()
+		h.history = make([]MessageReq, 0)
+		h.historyMutex.Unlock()
+	}
 }

@@ -1,13 +1,16 @@
 package updater
 
 import (
+	"context"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/tarik0/DexEqualizer/circle"
+	"github.com/tarik0/DexEqualizer/config"
 	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/utils"
 	"github.com/tarik0/DexEqualizer/variables"
 	"math/big"
+	"time"
 )
 
 // Start
@@ -52,10 +55,20 @@ func (p *PairUpdater) Start() error {
 	// Sort circles.
 	p.sortCircles()
 
+	// Subscribe to new blocks.
+	p.subscribeToHeads()
+
 	// Subscribe to events.
 	p.subscribeToSync()
 
-	// Start listening.
+	// Get current block number.
+	blockNum, err := p.backend.BlockNumber(context.Background())
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to get block number.")
+	}
+	p.lastBlockNum.Store(blockNum)
+
+	// Start listening for events.
 	go func() {
 		var err error
 		var vLog types.Log
@@ -67,9 +80,31 @@ func (p *PairUpdater) Start() error {
 				close(p.logsCh)
 				logger.Log.WithError(err).Errorln("Disconnected from the logs! Reconnecting...")
 				p.subscribeToSync()
+				logger.Log.WithError(err).Errorln("Connected back to the logs!")
 			case vLog = <-p.logsCh:
 				// Redirect to listen method.
-				p.listenSync(vLog)
+				go p.listenSync(vLog)
+			}
+		}
+	}()
+
+	// Start listening for new heads.
+	go func() {
+		var err error
+
+		for {
+			select {
+			case err = <-p.blocksSub.Err():
+				// Disconnected, retry.
+				close(p.blocksCh)
+				logger.Log.WithError(err).Errorln("Disconnected from the new blocks! Reconnecting...")
+				p.subscribeToHeads()
+				logger.Log.WithError(err).Errorln("Connected back to the new blocks!")
+			case header := <-p.blocksCh:
+				// Redirect to the listen method.
+				if header != nil {
+					go p.listenBlocks(header)
+				}
 			}
 		}
 	}()
@@ -104,11 +139,38 @@ func (p *PairUpdater) GetPairFee(addr common.Address) (*big.Int, error) {
 // GetSortedTrades
 //	Returns sorted options.
 func (p *PairUpdater) GetSortedTrades() []*circle.TradeOption {
-	return p.sortedTrades
+	val := p.sortedTrades.Load()
+	if val == nil {
+		return nil
+	}
+
+	return val.([]*circle.TradeOption)
+}
+
+// GetSortTime
+//	Returns the sort time.
+func (p *PairUpdater) GetSortTime() time.Duration {
+	val := p.sortTime.Load()
+	if val == nil {
+		return time.Duration(0)
+	}
+
+	return val.(time.Duration)
+}
+
+// GetBlockNumber
+//	Returns the latest block number.
+func (p *PairUpdater) GetBlockNumber() uint64 {
+	val := p.lastBlockNum.Load()
+	if val == nil {
+		return uint64(0)
+	}
+
+	return val.(uint64)
 }
 
 // GetOptimalIn calculates the optimal input amount for maximum profit.
-func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (*big.Int, []*big.Int, error) {
+func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bestAmountOut []*big.Int, err error) {
 	// Check if it's a circle.
 	if c.Path[0] != c.Path[len(c.Path)-1] {
 		return nil, nil, variables.InvalidInput
@@ -258,24 +320,32 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (*big.Int, []*big.Int, erro
 	// The scenarios.
 	if errOne != nil && errTwo != nil {
 		// No arbitrage.
-		return nil, nil, variables.NoArbitrage
+		bestAmountIn, bestAmountOut, err = nil, nil, variables.NoArbitrage
 	} else if errOne == nil && errTwo != nil {
 		// Root one.
-		return rootOne, amountOutsOne, nil
+		bestAmountIn, bestAmountOut, err = rootOne, amountOutsOne, nil
 	} else if errOne != nil && errTwo == nil {
 		// Root two.
-		return rootTwo, amountOutsTwo, nil
+		bestAmountIn, bestAmountOut, err = rootTwo, amountOutsTwo, nil
 	} else {
 		// Calculate profit.
 		profitOne := new(big.Int).Sub(amountOutsOne[len(amountOutsOne)-1], amountOutsOne[0])
 		profitTwo := new(big.Int).Sub(amountOutsTwo[len(amountOutsTwo)-1], amountOutsTwo[0])
 
 		if profitOne.Cmp(profitTwo) > 0 {
-			return profitOne, amountOutsOne, nil
+			bestAmountIn, bestAmountOut, err = profitOne, amountOutsOne, nil
 		} else {
-			return profitTwo, amountOutsTwo, nil
+			bestAmountIn, bestAmountOut, err = profitTwo, amountOutsTwo, nil
 		}
 	}
+
+	// Check limit.
+	if err != nil && bestAmountIn.Cmp(utils.EthersToWei(config.Parsed.ArbitrageOptions.Limiters.MaxAmountIn)) > 0 {
+		bestAmountIn.Set(utils.EthersToWei(config.Parsed.ArbitrageOptions.Limiters.MaxAmountIn))
+		bestAmountOut, _ = p.GetAmountsOut(bestAmountIn, c.Path, c.PairAddresses)
+	}
+
+	return bestAmountIn, bestAmountOut, err
 }
 
 // GetAmountsOut calculates amounts out.

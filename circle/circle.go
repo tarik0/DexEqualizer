@@ -18,6 +18,7 @@ type Circle struct {
 	PairFees      []*big.Int
 	PairTokens    [][]common.Address
 	PairAddresses []common.Address
+	PairReserves  [][]*big.Int
 }
 
 // TradeOption

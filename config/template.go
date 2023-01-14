@@ -16,12 +16,12 @@ var Parsed *ArbZeroConfig
 //	The config template.
 type ArbZeroConfig struct {
 	Network struct {
-		NoSend     bool           `yaml:"No Send"`
 		PrivateKey string         `yaml:"Private Key"`
 		WETH       common.Address `yaml:"WETH"`
 	} `yaml:"Network"`
 	Contracts struct {
-		Flashloan   common.Address `yaml:"Flashloan"`
+		Executor    common.Address `yaml:"Executor"`
+		GasToken    common.Address `yaml:"Gas Token"`
 		Multicaller common.Address `yaml:"Multicaller"`
 	} `yaml:"Contracts"`
 	ArbitrageOptions struct {

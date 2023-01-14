@@ -4,8 +4,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/tarik0/DexEqualizer/abis"
+	"github.com/tarik0/DexEqualizer/wallet"
 	"math/big"
 )
+
+// The flags.
+
+var IsDev bool
 
 // The token variables.
 
@@ -24,3 +30,11 @@ var TokenFees map[common.Address]*big.Int
 var EthClient *ethclient.Client
 var RpcClient *rpc.Client
 var ChainId *big.Int
+
+// The wallet.
+
+var Wallet *wallet.Wallet
+
+// The contracts.
+
+var SwapExec *abis.SwapExecutorV2

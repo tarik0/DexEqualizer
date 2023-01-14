@@ -43,12 +43,19 @@ func (t *TradeOption) GetProfit() (*big.Int, error) {
 
 // TriggerLimit returns the trigger limit.
 func (t *TradeOption) TriggerLimit() *big.Int {
-	// Trigger limit.
-	gasPrice := new(big.Int).Mul(big.NewInt(5), big.NewInt(1e9)) // 5Gwei
-	gasLimit := big.NewInt(int64(len(t.Circle.Pairs) * 150000))
-	gasCost := new(big.Int).Mul(gasPrice, gasLimit)
+	// Fixed cost.
+	gasLimit := t.TriggerGas()
 
-	return gasCost
+	// Gas price.
+	gasPrice := new(big.Int).Mul(big.NewInt(7), big.NewInt(1e9)) // 7 Gwei
+
+	return gasLimit.Mul(gasLimit, gasPrice)
+}
+
+// TriggerGas returns the gas
+func (t *TradeOption) TriggerGas() *big.Int {
+	// Swap + Transfer cost.
+	return new(big.Int).Mul(variables.GasPerHop, big.NewInt(int64(len(t.Circle.Pairs))))
 }
 
 func (t *TradeOption) GetJSON() TradeOptionJSON {

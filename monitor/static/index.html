@@ -56,7 +56,9 @@
                 <div class="col">
                     <p id="sort-time">Sort Time: 0 ms</p>
                 </div>
-                <div class="col"></div>
+                <div class="col">
+                    <p id="block-number" class="text-center">Block: 0</p>
+                </div>
                 <div class="col mx-0">
                     <p id="last-update">0</p>
                 </div>
@@ -158,11 +160,11 @@
         const socket = new WebSocket(`ws://${location.host}/dex_eq`);
 
         // Add new message function.
-        const addNewMessage = (message) => {
+        const addNewMessage = (timestamp, message) => {
             let logElement = `
                 <div class="row board mx-0 px-0 mb-2">
                 <div class="col-2 text-center date m-auto">
-                    <span>${new Date(Date.now()).toLocaleString()}</span>
+                    <span>${new Date(timestamp).toLocaleString()}</span>
                 </div>
                 <div class="col-10 p-3">
                     <span>
@@ -178,7 +180,7 @@
         // When connection opened.
         socket.addEventListener("open", (event) => {
             console.log("Connected to websocket!")
-            addNewMessage("Connected to the DexEqualizer!")
+            addNewMessage(Date.now(), "Connected to the DexEqualizer!")
         });
 
         // When connection closed.
@@ -197,51 +199,57 @@
 
         // Listen for messages
         socket.addEventListener("message", (event) => {
-            // Parse data.
-            let message;
-            try {
-                message = JSON.parse(event.data);
-            } catch {
-                return;
-            }
-
-            // Rank.
-            if (message.type === "Rank") {
-                // Update sort time.
-                document.getElementById("sort-time").innerText = `Sort Time: ${message.Data.SortTime} ms`
-                document.getElementById("last-update").innerText = new Date(Date.now()).toLocaleString();
-
-                // Update chart.
-                chart.data.labels = message.Data.Circles.map(circle => circle.Symbols.join("->"));
-                chart.data.datasets[0].data = message.Data.Circles.map(circle => {
-                    let profit = (new ethers.utils.BigNumber(
-                        circle.AmountsOut[circle.AmountsOut.length-1]
-                    )).sub(
-                        circle.AmountsOut[0]
-                    )
-
-                    return parseFloat(ethers.utils.formatEther(profit))
-                });
-                chart.data.datasets[1].data = message.Data.Circles.map(circle => {
-                    return parseFloat(ethers.utils.formatEther(circle.TriggerLimit))
-                })
-
-                chart.update();
-                return;
-            }
-
-            // Announcement.
-            if (message.type === "Message") {
-                addNewMessage(message.Data.Message)
-                return;
-            }
-
-            // History.
-            if (message.type === "History") {
-                for (let i = 0; i < message.Data.Messages.length; i++) {
-                    addNewMessage(message.Data.Messages[i].Message)
+            // Split by new lines.
+            let messages = event.data.split("\n");
+            messages.forEach((messageRaw) => {
+                // Parse data.
+                let message;
+                try {
+                    message = JSON.parse(messageRaw);
+                } catch (ex) {
+                    console.error("Unable to decode", message, ex)
+                    return;
                 }
-            }
+
+                // Rank.
+                if (message.type === "Rank") {
+                    // Update sort time.
+                    document.getElementById("sort-time").innerText = `Sort Time: ${message.Data.SortTime} ms`
+                    document.getElementById("last-update").innerText = new Date(Date.now()).toLocaleString();
+                    document.getElementById("block-number").innerText = `Block: ${message.Data.BlockNumber}`
+
+                    // Update chart.
+                    chart.data.labels = message.Data.Circles.map(circle => circle.Symbols.join("->"));
+                    chart.data.datasets[0].data = message.Data.Circles.map(circle => {
+                        let profit = (new ethers.utils.BigNumber(
+                            circle.AmountsOut[circle.AmountsOut.length-1]
+                        )).sub(
+                            circle.AmountsOut[0]
+                        )
+
+                        return parseFloat(ethers.utils.formatEther(profit))
+                    });
+                    chart.data.datasets[1].data = message.Data.Circles.map(circle => {
+                        return parseFloat(ethers.utils.formatEther(circle.TriggerLimit))
+                    })
+
+                    chart.update();
+                    return;
+                }
+
+                // Announcement.
+                if (message.type === "Message") {
+                    addNewMessage(message.Data.Timestamp, message.Data.Message)
+                    return;
+                }
+
+                // History.
+                if (message.type === "History") {
+                    for (let i = 0; i < message.Data.Messages.length; i++) {
+                        addNewMessage(message.Data.Timestamp, message.Data.Messages[i].Message)
+                    }
+                }
+            })
         });
     </script>
 </html>
