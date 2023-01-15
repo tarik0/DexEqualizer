@@ -758,15 +758,17 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 			}
 
 			// Append to channel.
-			resMutex.Lock()
+			resMutex.RLock()
+			resultCount := atomic.LoadInt32(resCount)
+			resMutex.RUnlock()
 
 			// Check limiter.
-			if atomic.LoadInt32(resCount) > int32(params.MaxResultCount) {
-				resMutex.Unlock()
+			if resultCount > int32(params.MaxResultCount) {
 				break
 			}
 
 			// Iterate over routes.
+			resMutex.Lock()
 			for _, pairAddr := range arbCircle.PairAddresses {
 				if _, ok = (*table)[pairAddr]; !ok {
 					(*table)[pairAddr] = make(map[uint64]*circle.Circle, 0)

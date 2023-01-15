@@ -16,15 +16,22 @@ func (d *DexPair) SetReserves(reserveA *big.Int, reserveB *big.Int) {
 
 // GetSortedReserves sorts the reserves and returns.
 func (d *DexPair) GetSortedReserves(address common.Address) (reserveIn *big.Int, reserveOut *big.Int, err error) {
+	// Lock the reserve mutex.
+	d.reserveMutex.RLock()
+
 	// Sort reserves.
 	if address == d.TokenA {
-		reserveIn, reserveOut = d.ReserveA, d.ReserveB
+		reserveIn, reserveOut, err = new(big.Int).Set(d.ReserveA), new(big.Int).Set(d.ReserveB), nil
 	} else if address == d.TokenB {
-		reserveIn, reserveOut = d.ReserveB, d.ReserveA
+		reserveIn, reserveOut, err = new(big.Int).Set(d.ReserveB), new(big.Int).Set(d.ReserveA), nil
 	} else {
-		return nil, nil, variables.InvalidInput
+		reserveIn, reserveOut, err = nil, nil, variables.InvalidInput
 	}
-	return reserveIn, reserveOut, nil
+
+	// Unlock the reserve mutex.
+	d.reserveMutex.RUnlock()
+
+	return reserveIn, reserveOut, err
 }
 
 // SortTokens

@@ -52,11 +52,19 @@ contract SwapExecutorV2 {
             "SE1"
         );
 
+        // Recursive variables.
+        uint r0;
+        uint r1;
+
         // Check reserves.
         for (uint i = 0; i < params.Pairs.length; i++) {
-            (uint r0, uint r1,) = IUniswapV2Pair(params.Pairs[i]).getReserves();
+
+            // Get reserves.
+            (r0, r1,) = IUniswapV2Pair(params.Pairs[i]).getReserves();
+
+            // Check if reserves are sync.
             if (r0 != params.Reserves[i][0] || r1 != params.Reserves[i][1]) {
-                if (params.RevertOnReserveChange) require(false, "SE2");
+                require(!params.RevertOnReserveChange, "SE2");
                 return;
             }
         }

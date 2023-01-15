@@ -7,13 +7,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/tarik0/DexEqualizer/abis"
 	"github.com/tarik0/DexEqualizer/logger"
+	"github.com/tarik0/DexEqualizer/utils"
 	"math/big"
 	"os"
 	"strings"
 )
 
 func main() {
-	rawAbi := abis.FlashloanExecutorV2MetaData.ABI
+	rawAbi := abis.SwapExecutorV2MetaData.ABI
 	execAbi, err := abi.JSON(strings.NewReader(rawAbi))
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to load flashloan executor abi.")
@@ -27,7 +28,7 @@ func main() {
 		logger.Log.WithError(err).Fatalln("Unable to decode parameters.")
 	}
 
-	params, err := execAbi.Methods["executeFlashloan"].Inputs.Unpack(paramsBytes)
+	params, err := execAbi.Methods["executeSwap"].Inputs.Unpack(paramsBytes)
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to unpack parameters.")
 	}
@@ -38,8 +39,9 @@ func main() {
 		PairTokens            [][]common.Address "json:\"PairTokens\""
 		Path                  []common.Address   "json:\"Path\""
 		AmountsOut            []*big.Int         "json:\"AmountsOut\""
-		BorrowFee             *big.Int           "json:\"BorrowFee\""
 		RevertOnReserveChange bool               "json:\"RevertOnReserveChange\""
+		GasToken              common.Address     "json:\"GasToken\""
+		UseGasToken           bool               "json:\"UseGasToken\""
 	})
 
 	logger.Log.Infoln("Pairs:")
@@ -66,4 +68,15 @@ func main() {
 	for i, tokens := range tx_param.PairTokens {
 		logger.Log.Infoln(fmt.Sprintf("[%d/%d] %s, %s", i, len(tx_param.PairTokens), tokens[0].String(), tokens[1].String()))
 	}
+
+	logger.Log.Infoln("")
+
+	logger.Log.Infoln("Reserves")
+	for i, reserves := range tx_param.Reserves {
+		logger.Log.Infoln(fmt.Sprintf("[%d/%d] R0: %s, R1: %s", i, len(tx_param.PairTokens), reserves[0].String(), reserves[1].String()))
+	}
+
+	// Validate amounts.
+	_, amountOut, _ := utils.GetAmountOut(tx_param.AmountsOut[0], big.NewInt(9975), tx_param.Reserves[0][0], tx_param.Reserves[0][1])
+	logger.Log.Infoln(amountOut.String())
 }
