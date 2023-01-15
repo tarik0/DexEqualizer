@@ -13,7 +13,7 @@ import (
 
 // Config variables.
 
-var MaxProcessAmount = 750
+var MaxProcessAmount = 10000
 var MaxHops = 3
 var MaxCircleResults = 10000
 

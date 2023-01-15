@@ -133,7 +133,19 @@ func (p *PairUpdater) GetPairFee(addr common.Address) (*big.Int, error) {
 		return nil, variables.InvalidInput
 	}
 
-	return pairFee, nil
+	return new(big.Int).Set(pairFee), nil
+}
+
+// GetTokenFee
+//	Helper function to retrieve token's fee.
+func (p *PairUpdater) GetTokenFee(addr common.Address) (*big.Int, error) {
+	// Get token's fee.
+	inFee, ok := p.params.Tokens.Fees[addr]
+	if !ok {
+		return nil, variables.InvalidInput
+	}
+
+	return new(big.Int).Set(inFee), nil
 }
 
 // GetSortedTrades
@@ -196,10 +208,10 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 		}
 
 		// Get token fees.
-		inFee, ok := p.params.Tokens.Fees[c.Path[pairId]]
-		outFee, ok := p.params.Tokens.Fees[c.Path[pairId+1]]
-		if !ok {
-			return nil, nil, variables.InvalidInput
+		inFee, err := p.GetTokenFee(c.Path[pairId])
+		outFee, err := p.GetTokenFee(c.Path[pairId+1])
+		if err != nil {
+			return nil, nil, err
 		}
 
 		// Sort reserves.
@@ -262,8 +274,8 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 			d = new(big.Int).Set(common.Big0)
 		} else if pairId == 1 {
 			// Get the first token's fee.
-			firstTokenFee, ok := p.params.Tokens.Fees[c.Path[0]]
-			if !ok {
+			firstTokenFee, err := p.GetTokenFee(c.Path[0])
+			if err != nil {
 				return nil, nil, variables.InvalidInput
 			}
 
@@ -305,17 +317,28 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 		return nil, nil, variables.NoArbitrage
 	}
 
+	// Max input.
+	maxIn := utils.EthersToWei(config.Parsed.ArbitrageOptions.Limiters.MaxAmountIn)
+
 	// Limit roots.
-	if rootOne.Cmp(variables.MaxOptimalIn) > 0 {
-		rootOne.Set(big.NewInt(1e18))
+	if rootOne.Cmp(maxIn) > 0 {
+		rootOne.Set(maxIn)
 	}
-	if rootTwo.Cmp(variables.MaxOptimalIn) > 0 {
-		rootTwo.Set(big.NewInt(1e18))
+	if rootTwo.Cmp(maxIn) > 0 {
+		rootTwo.Set(maxIn)
 	}
 
 	// Calculate amounts out.
-	amountOutsOne, errOne := p.GetAmountsOut(rootOne, c.Path, c.PairAddresses)
-	amountOutsTwo, errTwo := p.GetAmountsOut(rootTwo, c.Path, c.PairAddresses)
+	var errOne = variables.InvalidInput
+	var errTwo = variables.InvalidInput
+	var amountOutsOne []*big.Int
+	var amountOutsTwo []*big.Int
+	if rootTwo.Cmp(rootOne) == 0 {
+		amountOutsOne, errOne = p.GetAmountsOut(rootOne, c.Path, c.PairAddresses)
+	} else {
+		amountOutsOne, errOne = p.GetAmountsOut(rootOne, c.Path, c.PairAddresses)
+		amountOutsTwo, errTwo = p.GetAmountsOut(rootTwo, c.Path, c.PairAddresses)
+	}
 
 	// The scenarios.
 	if errOne != nil && errTwo != nil {
@@ -339,12 +362,6 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 		}
 	}
 
-	// Check limit.
-	if err != nil && bestAmountIn.Cmp(utils.EthersToWei(config.Parsed.ArbitrageOptions.Limiters.MaxAmountIn)) > 0 {
-		bestAmountIn.Set(utils.EthersToWei(config.Parsed.ArbitrageOptions.Limiters.MaxAmountIn))
-		bestAmountOut, _ = p.GetAmountsOut(bestAmountIn, c.Path, c.PairAddresses)
-	}
-
 	return bestAmountIn, bestAmountOut, err
 }
 
@@ -355,7 +372,8 @@ func (p *PairUpdater) GetAmountsOut(
 	route []common.Address,
 ) ([]*big.Int, error) {
 	// The temporary amounts out variable.
-	amountsOut := []*big.Int{amountIn}
+	var amountsOut = make([]*big.Int, len(path))
+	amountsOut[0] = new(big.Int).Set(amountIn)
 
 	// Iterate over pairs.
 	for i, pairAddr := range route {
@@ -366,9 +384,9 @@ func (p *PairUpdater) GetAmountsOut(
 		}
 
 		// Get token fees.
-		inputTokenFee, ok := p.params.Tokens.Fees[path[i]]
-		outputTokenFee, ok := p.params.Tokens.Fees[path[i+1]]
-		if !ok {
+		inputTokenFee, err := p.GetTokenFee(path[i])
+		outputTokenFee, err := p.GetTokenFee(path[i+1])
+		if err != nil {
 			return nil, err
 		}
 
@@ -379,7 +397,7 @@ func (p *PairUpdater) GetAmountsOut(
 		}
 
 		// Amount in.
-		tmpIn := new(big.Int).Set(amountsOut[len(amountsOut)-1])
+		tmpIn := new(big.Int).Set(amountsOut[i])
 		tmpIn = utils.CutFee(tmpIn, inputTokenFee)
 
 		// Calculate
@@ -396,7 +414,8 @@ func (p *PairUpdater) GetAmountsOut(
 			return nil, variables.InvalidInput
 		}
 
-		amountsOut = append(amountsOut, amountOut)
+		// Append to list.
+		amountsOut[i+1] = new(big.Int).Set(amountOut)
 	}
 
 	return amountsOut, nil

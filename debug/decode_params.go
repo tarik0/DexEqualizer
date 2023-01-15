@@ -77,6 +77,6 @@ func main() {
 	}
 
 	// Validate amounts.
-	_, amountOut, _ := utils.GetAmountOut(tx_param.AmountsOut[0], big.NewInt(9975), tx_param.Reserves[0][0], tx_param.Reserves[0][1])
+	_, amountOut, _ := utils.GetAmountOut(tx_param.AmountsOut[2], big.NewInt(9975), tx_param.Reserves[2][0], tx_param.Reserves[2][1])
 	logger.Log.Infoln(amountOut.String())
 }

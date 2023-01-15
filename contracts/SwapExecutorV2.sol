@@ -18,10 +18,7 @@ interface IChiToken {
 /// SE1: Check your inputs.
 /// SE2: Invalid reserves.
 /// SE3: Token transfer failed.
-
-/// @dev Setup
-/// Approve WETH
-/// Approve CHI
+/// SE4: Gas token burn failed.
 
 /// @title SwapExecutorV2
 /// @author cool guy (@tarik0)
@@ -29,21 +26,11 @@ interface IChiToken {
 contract SwapExecutorV2 {
     using SafeMath for uint;
 
-    /// @dev discountChi frees some chi to refund gas.
-    modifier discountCHI(address chi, bool useChi) {
-        if (useChi) {
-            uint256 gasStart = gasleft();
-            _;
-            uint256 gasSpent = 21000 + gasStart - gasleft() + 16 * msg.data.length;
-            IChiToken(chi).freeFromUpTo(msg.sender, (gasSpent + 14154) / 41947);
-        }
-    }
-
     /// @notice Executes a swap between params.Pairs.
     /// @dev Executes a swap between params.Pairs using the parameters.
     function executeSwap(
         SwapParameters calldata params
-    ) external discountCHI(params.GasToken, params.UseGasToken) {
+    ) external {
         // Check inputs.
         require(
             params.Pairs.length + 1 == params.Path.length &&
@@ -52,19 +39,11 @@ contract SwapExecutorV2 {
             "SE1"
         );
 
-        // Recursive variables.
-        uint r0;
-        uint r1;
-
         // Check reserves.
         for (uint i = 0; i < params.Pairs.length; i++) {
-
-            // Get reserves.
-            (r0, r1,) = IUniswapV2Pair(params.Pairs[i]).getReserves();
-
-            // Check if reserves are sync.
+            (uint r0, uint r1,) = IUniswapV2Pair(params.Pairs[i]).getReserves();
             if (r0 != params.Reserves[i][0] || r1 != params.Reserves[i][1]) {
-                require(!params.RevertOnReserveChange, "SE2");
+                if (params.RevertOnReserveChange) require(false, "SE2");
                 return;
             }
         }
@@ -96,6 +75,19 @@ contract SwapExecutorV2 {
             // Swap.
             IUniswapV2Pair(params.Pairs[i]).swap(amount0Out, amount1Out, to, new bytes(0));
         }
+
+        // Stop here if you don't want to use gas token.
+        if (!params.UseGasToken) return
+
+        // Burn gas token.
+        (success,) = address(params.GasToken).call(
+            abi.encodeWithSelector(
+                IChiToken.freeFromUpTo.selector,
+                msg.sender,
+                params.Pairs.length
+            )
+        );
+        require(success, "SE4");
     }
 }
 
