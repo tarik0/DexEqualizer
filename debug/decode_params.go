@@ -7,7 +7,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/tarik0/DexEqualizer/abis"
 	"github.com/tarik0/DexEqualizer/logger"
-	"github.com/tarik0/DexEqualizer/utils"
 	"math/big"
 	"os"
 	"strings"
@@ -52,7 +51,7 @@ func main() {
 
 	logger.Log.Infoln("Path")
 	for i, addr := range tx_param.Path {
-		logger.Log.Infoln(fmt.Sprintf("[%d/%d] %s", i, len(tx_param.Pairs), addr.String()))
+		logger.Log.Infoln(fmt.Sprintf("[%d/%d] %s", i, len(tx_param.Path), addr.String()))
 	}
 
 	logger.Log.Infoln("")
@@ -76,7 +75,7 @@ func main() {
 		logger.Log.Infoln(fmt.Sprintf("[%d/%d] R0: %s, R1: %s", i, len(tx_param.PairTokens), reserves[0].String(), reserves[1].String()))
 	}
 
-	// Validate amounts.
-	_, amountOut, _ := utils.GetAmountOut(tx_param.AmountsOut[2], big.NewInt(9975), tx_param.Reserves[2][0], tx_param.Reserves[2][1])
-	logger.Log.Infoln(amountOut.String())
+	logger.Log.Infoln("")
+	logger.Log.Infoln("Use Gas Token:", tx_param.UseGasToken)
+	logger.Log.Infoln("Gas Token:", tx_param.GasToken.String())
 }

@@ -9,15 +9,16 @@ import (
 	"github.com/tarik0/DexEqualizer/dexpair"
 	"math/big"
 	"sync/atomic"
+	"time"
 )
 
 // Config variables.
 
 var MaxProcessAmount = 10000
 var MaxHops = 3
-var MaxCircleResults = 10000
+var MaxCircleResults = 7000
 
-type OnSortCallback func(header *types.Header, u *PairUpdater)
+type OnSortCallback func(header *types.Header, updateTime time.Duration, u *PairUpdater)
 
 // PairUpdater
 //	A system that checks pair reserves for arbitrage options.
@@ -47,17 +48,15 @@ type PairUpdater struct {
 	OnSort OnSortCallback
 
 	// Channels.
-	logsCh   chan types.Log
 	blocksCh chan *types.Header
 
 	// Subscriptions
-	logsSub   ethereum.Subscription
+	// logsSub   ethereum.Subscription
 	blocksSub ethereum.Subscription
 
 	// Atomic variables.
 	lastBlockNum atomic.Value
 	sortedTrades atomic.Value
-	sortTime     atomic.Value
 
 	// Other variables.
 	params  *PairUpdaterParams

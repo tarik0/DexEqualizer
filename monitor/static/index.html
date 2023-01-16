@@ -202,12 +202,15 @@
             // Split by new lines.
             let messages = event.data.split("\n");
             messages.forEach((messageRaw) => {
+                if (messageRaw === undefined || messageRaw === null) return;
+
                 // Parse data.
                 let message;
                 try {
                     message = JSON.parse(messageRaw);
                 } catch (ex) {
-                    console.error("Unable to decode", message, ex)
+                    console.error("Unable to decode", messageRaw);
+                    console.error(ex)
                     return;
                 }
 

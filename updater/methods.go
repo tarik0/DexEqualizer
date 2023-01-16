@@ -3,14 +3,12 @@ package updater
 import (
 	"context"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
 	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/utils"
 	"github.com/tarik0/DexEqualizer/variables"
 	"math/big"
-	"time"
 )
 
 // Start
@@ -28,6 +26,12 @@ func (p *PairUpdater) Start() error {
 		return err
 	}
 
+	// Find token decimals.
+	err = p.findDecimals()
+	if err != nil {
+		return err
+	}
+
 	// Find pair addresses.
 	err = p.findPairAddresses()
 	if err != nil {
@@ -36,12 +40,6 @@ func (p *PairUpdater) Start() error {
 
 	// Find pair reserves.
 	err = p.findReserves()
-	if err != nil {
-		return err
-	}
-
-	// Find token decimals.
-	err = p.findDecimals()
 	if err != nil {
 		return err
 	}
@@ -58,35 +56,12 @@ func (p *PairUpdater) Start() error {
 	// Subscribe to new blocks.
 	p.subscribeToHeads()
 
-	// Subscribe to events.
-	p.subscribeToSync()
-
 	// Get current block number.
 	blockNum, err := p.backend.BlockNumber(context.Background())
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to get block number.")
 	}
 	p.lastBlockNum.Store(blockNum)
-
-	// Start listening for events.
-	go func() {
-		var err error
-		var vLog types.Log
-
-		for {
-			select {
-			case err = <-p.logsSub.Err():
-				// Disconnected, retry.
-				close(p.logsCh)
-				logger.Log.WithError(err).Errorln("Disconnected from the logs! Reconnecting...")
-				p.subscribeToSync()
-				logger.Log.WithError(err).Errorln("Connected back to the logs!")
-			case vLog = <-p.logsCh:
-				// Redirect to listen method.
-				go p.listenSync(vLog)
-			}
-		}
-	}()
 
 	// Start listening for new heads.
 	go func() {
@@ -157,17 +132,6 @@ func (p *PairUpdater) GetSortedTrades() []*circle.TradeOption {
 	}
 
 	return val.([]*circle.TradeOption)
-}
-
-// GetSortTime
-//	Returns the sort time.
-func (p *PairUpdater) GetSortTime() time.Duration {
-	val := p.sortTime.Load()
-	if val == nil {
-		return time.Duration(0)
-	}
-
-	return val.(time.Duration)
 }
 
 // GetBlockNumber

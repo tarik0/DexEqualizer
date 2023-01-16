@@ -30,32 +30,29 @@ func (t *TradeOption) GetProfit() (*big.Int, error) {
 		t.AmountsOut[0],
 	)
 
-	// Calculate loan debt.
-	loanDebt := new(big.Int).Mul(
-		new(big.Int).Sub(variables.Big10000, t.Circle.PairFees[0]),
-		t.AmountsOut[0],
-	)
-	loanDebt.Div(loanDebt, variables.Big10000)
-
 	// Subs profit.
-	return profit.Sub(profit, loanDebt), nil
+	return profit, nil
 }
 
-// TriggerLimit returns the trigger limit.
-func (t *TradeOption) TriggerLimit() *big.Int {
-	// Fixed cost.
-	gasLimit := t.TriggerGas()
-
-	// Gas price.
-	gasPrice := new(big.Int).Mul(big.NewInt(7), big.NewInt(1e9)) // 7 Gwei
-
-	return gasLimit.Mul(gasLimit, gasPrice)
+// Gas returns the transaction gas.
+func (t *TradeOption) Gas() uint64 {
+	return uint64(len(t.Circle.Pairs)) * variables.GasPerHopChi
 }
 
-// TriggerGas returns the gas
-func (t *TradeOption) TriggerGas() *big.Int {
-	// Swap + Transfer cost.
-	return new(big.Int).Mul(variables.GasPerHop, big.NewInt(int64(len(t.Circle.Pairs))))
+// TriggerProfit returns the minimum amount of profit we need to trigger a swap.
+func (t *TradeOption) TriggerProfit() *big.Int {
+	gasCost := new(big.Int).SetUint64(t.TriggerGas())
+	gasCost.Mul(gasCost, variables.GasPrice)
+
+	return gasCost
+}
+
+// TriggerGas returns the maximum amount of gas this circle should use to profit.
+func (t *TradeOption) TriggerGas() uint64 {
+	gas := uint64(len(t.Circle.Pairs)) * variables.GasPerHop
+	gas -= uint64(len(t.Circle.Pairs)+1) * variables.ChiRefundGas
+	gas -= uint64(len(t.Circle.Pairs)-2) * 5000
+	return gas
 }
 
 func (t *TradeOption) GetJSON() TradeOptionJSON {
@@ -82,7 +79,7 @@ func (t *TradeOption) GetJSON() TradeOptionJSON {
 		Symbols:      t.Circle.Symbols,
 		Pairs:        pairsStr,
 		AmountsOut:   amountsStr,
-		TriggerLimit: t.TriggerLimit(),
+		TriggerLimit: t.TriggerProfit(),
 	}
 }
 

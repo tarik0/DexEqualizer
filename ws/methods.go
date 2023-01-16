@@ -48,7 +48,7 @@ func (h *Hub) SetHandler() {
 func (h *Hub) sendHello(newClient *Client) {
 	// Get trade options.
 	options := h.updater.GetSortedTrades()
-	if options == nil {
+	if options == nil || len(options) == 0 {
 		return
 	}
 
@@ -93,7 +93,7 @@ func (h *Hub) sendHello(newClient *Client) {
 		Type: "Rank",
 		Data: RankReq{
 			Circles:     tradesJson,
-			SortTime:    h.updater.GetSortTime().Milliseconds(),
+			SortTime:    0,
 			BlockNumber: blockNum,
 		},
 	})

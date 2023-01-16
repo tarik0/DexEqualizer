@@ -513,31 +513,8 @@ func (p *PairUpdater) findCircles() error {
 // sortCircles
 //	Sorts DFS circles.
 func (p *PairUpdater) sortCircles() {
-	tmp := time.Now()
 	sortedTrades := p.quickSortCircles()
-	sortTime := time.Since(tmp)
-
-	p.sortTime.Swap(sortTime)
 	p.sortedTrades.Swap(sortedTrades)
-}
-
-// subscribeToSync
-//	Subscribes to the sync event.
-func (p *PairUpdater) subscribeToSync() {
-	// To subscribe query.
-	query := ethereum.FilterQuery{
-		Addresses: maps.Keys(p.AddressToPair),
-	}
-
-	// Make new channel.
-	p.logsCh = make(chan types.Log)
-
-	// Subscribe to the events.
-	var err error
-	p.logsSub, err = p.backend.SubscribeFilterLogs(context.Background(), query, p.logsCh)
-	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to subscribe to 'sync' logs!")
-	}
 }
 
 // subscribeToHeads
@@ -554,41 +531,72 @@ func (p *PairUpdater) subscribeToHeads() {
 	}
 }
 
-// listenSync
-//	Listens new events.
-func (p *PairUpdater) listenSync(vLog types.Log) {
-	// Iterate over logs.
-	for _, log := range vLog.Topics {
-		// Continue if topic is not sync.
-		if !bytes.Equal(syncId.Bytes(), log.Bytes()) {
-			continue
-		}
-
-		// Decode event.
-		syncDetails, err := pairAbi.Unpack("Sync", vLog.Data)
-		if err != nil {
-			logger.Log.WithError(err).Errorln("Unable to decode 'sync' events.")
-			continue
-		}
-
-		// Update reserves.
-		resA, resB := syncDetails[0].(*big.Int), syncDetails[1].(*big.Int)
-		p.AddressToPair[vLog.Address].SetReserves(resA, resB)
-	}
-}
-
 // listenBlocks
 //	Listens new blocks.
 func (p *PairUpdater) listenBlocks(header *types.Header) {
+	// Total time to update a block.
+	start := time.Now()
+
+	// Get the previous 3 block's logs.
+	prevLogs, err := p.backend.FilterLogs(context.Background(), ethereum.FilterQuery{
+		Addresses: maps.Keys(p.AddressToPair),
+		FromBlock: new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64)),
+		ToBlock:   header.Number,
+	})
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to get previous logs.")
+	}
+
+	// Update events.
+	for _, log := range prevLogs {
+		// Iterate over topics.
+		for _, topic := range log.Topics {
+			// Continue if topic is not sync.
+			if !bytes.Equal(syncId.Bytes(), topic.Bytes()) {
+				continue
+			}
+
+			// Decode event.
+			syncDetails, err := pairAbi.Unpack("Sync", log.Data)
+			if err != nil {
+				logger.Log.WithError(err).Errorln("Unable to decode 'sync' events.")
+				break
+			}
+
+			// Update reserves.
+			resA, resB := syncDetails[0].(*big.Int), syncDetails[1].(*big.Int)
+			p.AddressToPair[log.Address].SetReserves(resA, resB)
+			break
+		}
+	}
+
 	// Sort the circles.
 	p.sortCircles()
 
 	// Update block number.
 	p.lastBlockNum.Swap(header.Number.Uint64())
 
-	// Trigger event.
-	if p.OnSort != nil {
-		p.OnSort(header, p)
+	// Set update time.
+	updateTime := time.Since(start)
+
+	// Print block latency.
+	if variables.IsDev {
+		go func() {
+			logger.Log.Infoln("Block Latency:", updateTime)
+		}()
+	}
+
+	// Check if it took too much time.
+	if updateTime > 750*time.Millisecond {
+		logger.Log.
+			WithField("latency", time.Since(start)).
+			WithField("blockNum", header.Number.Uint64()).
+			Infoln("Block latency is too much! Skipping this block...")
+	} else {
+		// Trigger event.
+		if p.OnSort != nil {
+			p.OnSort(header, updateTime, p)
+		}
 	}
 }
 
@@ -606,12 +614,14 @@ func (p *PairUpdater) quickSortCircles() []*circle.TradeOption {
 			continue
 		}
 
-		// Append to the list.
-		tradeArr = append(tradeArr, &circle.TradeOption{
+		option := &circle.TradeOption{
 			Circle:     value,
 			OptimalIn:  optimalIn,
 			AmountsOut: amountsOut,
-		})
+		}
+
+		// Append to the list.
+		tradeArr = append(tradeArr, option)
 	}
 
 	return p.quickSortUtil(tradeArr, 0, len(tradeArr)-1)
@@ -854,8 +864,8 @@ func (p *PairUpdater) multiCall(
 	}
 
 	// Call the aggregate function.
-	gasLimit, err := p.backend.EstimateGas(context.TODO(), msg)
-	result, err := p.backend.PendingCallContract(context.TODO(), msg)
+	gasLimit, err := p.backend.EstimateGas(context.Background(), msg)
+	result, err := p.backend.PendingCallContract(context.Background(), msg)
 	if err != nil {
 		return nil, nil, err
 	}

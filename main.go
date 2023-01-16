@@ -133,6 +133,11 @@ func main() {
 	logger.Log.Infoln("  Flashloan Executor:", config.Parsed.Contracts.Executor)
 	logger.Log.Infoln("")
 
+	if variables.IsDev {
+		logger.Log.Infoln("Development mode activated!")
+		logger.Log.Infoln("")
+	}
+
 	// Start web server.
 	monitor.SetWebHandler()
 
@@ -142,7 +147,7 @@ func main() {
 	go hub.Run()
 	go hub.ClearHistory()
 
-	// Set onSync.
+	// Set onSort.
 	u.OnSort = onSort
 
 	logger.Log.WithField("tokenCount", len(variables.TokenNames)).Infoln("Loading pair information...")
@@ -161,18 +166,15 @@ func main() {
 }
 
 // onSort gets triggered on new sort event.
-func onSort(header *types.Header, u *updater.PairUpdater) {
+func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdater) {
 	// Check balance.
-	checkBalance()
+	go checkBalance()
 
 	// Get trade options.
 	options := u.GetSortedTrades()
 	if options == nil {
 		return
 	}
-
-	// Get time.
-	sortTime := u.GetSortTime()
 
 	// Skip if no trades.
 	if len(options) == 0 {
@@ -197,7 +199,7 @@ func onSort(header *types.Header, u *updater.PairUpdater) {
 			Type: "Rank",
 			Data: ws.RankReq{
 				Circles:     tradesJson,
-				SortTime:    sortTime.Milliseconds(),
+				SortTime:    updateTime.Milliseconds(),
 				BlockNumber: header.Number.Uint64(),
 			},
 		})
@@ -212,11 +214,25 @@ func onSort(header *types.Header, u *updater.PairUpdater) {
 	// The pair addresses that we already took an action.
 	alreadyUsedPairs := make([]common.Address, 0)
 
+	// Estimate circles.
+	if variables.IsDev {
+		go func() {
+			circleGases, avgGas, errs := estimateCircles(options)
+			for i, _ := range circleGases {
+				if errs[i] != nil && fmt.Sprint(errs[i]) != "execution reverted: SE2" {
+					utils.PrintTradeOption(options[i])
+					logger.Log.WithError(errs[i]).Fatalln("Circle failed the simulation.")
+				}
+			}
+			logger.Log.Infoln("Avg Gas Per Hop:", avgGas)
+		}()
+	}
+
 	// Check circles.
 	for _, swapCircle := range options {
 		// Check if profitable.
 		profit, _ := swapCircle.GetProfit()
-		triggerLim := swapCircle.TriggerLimit()
+		triggerLim := swapCircle.TriggerProfit()
 		if profit.Cmp(triggerLim) < 0 {
 			return
 		}
@@ -236,8 +252,9 @@ func onSort(header *types.Header, u *updater.PairUpdater) {
 			continue
 		}
 
-		// Trigger swap.
-		go triggerSwap(swapCircle, triggerLim, profit)
+		// Trigger the best swap.
+		triggerSwap(swapCircle, triggerLim, profit)
+		break
 	}
 }
 
@@ -269,7 +286,7 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 			AmountsOut:            swapCircle.AmountsOut,
 			PairTokens:            swapCircle.Circle.PairTokens,
 			GasToken:              config.Parsed.Contracts.GasToken,
-			UseGasToken:           false,
+			UseGasToken:           true,
 			RevertOnReserveChange: true,
 		}
 
@@ -315,6 +332,10 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 				txCount += 1
 			}
 		}
+	}
+
+	if txCount == 0 {
+		txCount += 1
 	}
 
 	return gasLimits, allGasTotal / txCount, estimateErrors
@@ -363,10 +384,9 @@ func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int) 
 	}
 
 	// Set transactor values.
-	transactor.NoSend = variables.IsDev
 	transactor.GasPrice = variables.GasPrice
 	transactor.Value = common.Big0
-	transactor.GasLimit = swapCircle.TriggerGas().Uint64()
+	transactor.GasLimit = swapCircle.Gas()
 
 	// The parameter.
 	param := abis.SwapParameters{
@@ -376,7 +396,7 @@ func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int) 
 		AmountsOut:            swapCircle.AmountsOut,
 		PairTokens:            swapCircle.Circle.PairTokens,
 		GasToken:              config.Parsed.Contracts.GasToken,
-		UseGasToken:           false,
+		UseGasToken:           true,
 		RevertOnReserveChange: true,
 	}
 
@@ -391,9 +411,15 @@ func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int) 
 
 	// Log transaction.
 	logger.Log.WithFields(logrus.Fields{
-		"hash":   tx.Hash().String(),
-		"circle": swapCircle.GetJSON(),
+		"hash":          tx.Hash().String(),
+		"circle":        swapCircle.GetJSON(),
+		"gasCalculated": fmt.Sprintf("%.18f BNB", utils.WeiToEthers(swapCircle.TriggerProfit())),
+		"gasUsed":       swapCircle.TriggerGas(),
 	}).Infoln("Arbitrage transaction sent!")
+
+	if variables.IsDev {
+		logger.Log.Fatalln("Stopped for inspecting.")
+	}
 }
 
 // checkBalance checks the wallet balance and stops when too low.
