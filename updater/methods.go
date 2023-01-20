@@ -56,6 +56,9 @@ func (p *PairUpdater) Start() error {
 	// Subscribe to new blocks.
 	p.subscribeToHeads()
 
+	// Subscribe to new pending transactions.
+	p.subscribeToPending()
+
 	// Get current block number.
 	blockNum, err := p.backend.BlockNumber(context.Background())
 	if err != nil {
@@ -79,6 +82,18 @@ func (p *PairUpdater) Start() error {
 				// Redirect to the listen method.
 				if header != nil {
 					go p.listenBlocks(header)
+				}
+			}
+		}
+	}()
+
+	// Start listening for new transactions.
+	go func() {
+		for {
+			select {
+			case hash := <-p.pendingCh:
+				if hash != nil {
+					go p.listenPending(hash)
 				}
 			}
 		}

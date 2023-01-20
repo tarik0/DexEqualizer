@@ -10,11 +10,11 @@ import (
 
 // The config.
 
-var Parsed *ArbZeroConfig
+var Parsed *DexEqConfig
 
-// ArbZeroConfig
+// DexEqConfig
 //	The config template.
-type ArbZeroConfig struct {
+type DexEqConfig struct {
 	Network struct {
 		PrivateKey string         `yaml:"Private Key"`
 		WETH       common.Address `yaml:"WETH"`
@@ -28,6 +28,9 @@ type ArbZeroConfig struct {
 		Limiters struct {
 			MaxAmountIn *big.Float `yaml:"Max Amount In"`
 			StopBalance *big.Float `yaml:"Stop Balance"`
+			MaxHops     int        `yaml:"Max Hops"`
+			MinHops     int        `yaml:"Min Hops"`
+			MaxCircles  int32      `yaml:"Max Circles"`
 		} `yaml:"Limiters"`
 		GasOptions struct {
 			ExtraGasPercent *big.Int `yaml:"Extra Gas Percent"`
@@ -37,7 +40,7 @@ type ArbZeroConfig struct {
 
 // LoadConfig
 // 	Loads config.
-func LoadConfig(chainId *big.Int) (*ArbZeroConfig, error) {
+func LoadConfig(chainId *big.Int) (*DexEqConfig, error) {
 	// Read the bytes.
 	rawFile, err := ioutil.ReadFile(fmt.Sprintf("./chains/%d/config.yml", chainId))
 	if err != nil {
@@ -45,7 +48,7 @@ func LoadConfig(chainId *big.Int) (*ArbZeroConfig, error) {
 	}
 
 	// Parse bytes.
-	var parsed ArbZeroConfig
+	var parsed DexEqConfig
 	err = yaml.Unmarshal(rawFile, &parsed)
 	if err != nil {
 		return nil, err

@@ -9,7 +9,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/tarik0/DexEqualizer/abis"
 	"github.com/tarik0/DexEqualizer/circle"
+	"github.com/tarik0/DexEqualizer/config"
 	"github.com/tarik0/DexEqualizer/dexpair"
+	"github.com/tarik0/DexEqualizer/ganache"
 	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/variables"
 	"golang.org/x/exp/maps"
@@ -17,7 +19,6 @@ import (
 	"math/big"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -482,14 +483,12 @@ func (p *PairUpdater) findCircles() error {
 	pathSymbols[0] = tempInSymbol
 
 	dfsParams := DFSCircleParams{
-		MaxResultCount: MaxCircleResults,
-		MaxHops:        MaxHops,
-		Path:           path,
-		Symbols:        pathSymbols,
-		Route:          make([]common.Address, 0),
-		RouteFees:      make([]*big.Int, 0),
-		RouteTokens:    make([][]common.Address, 0),
-		RouteReserves:  make([][]*big.Int, 0),
+		Path:          path,
+		Symbols:       pathSymbols,
+		Route:         make([]common.Address, 0),
+		RouteFees:     make([]*big.Int, 0),
+		RouteTokens:   make([][]common.Address, 0),
+		RouteReserves: make([][]*big.Int, 0),
 	}
 
 	// Wait group.
@@ -499,12 +498,11 @@ func (p *PairUpdater) findCircles() error {
 	var resCount int32 = 0
 	var resMutex = sync.RWMutex{}
 
-	p.PairToCircles = make(map[common.Address]map[uint64]*circle.Circle)
 	p.Circles = make(map[uint64]*circle.Circle, 0)
 
 	// Start DFS.
 	wg.Add(1)
-	dfsUtilOnlyCircle(dfsParams, &p.PairToCircles, &p.Circles, &resMutex, &resCount, &wg, p)
+	dfsUtilOnlyCircle(dfsParams, &p.Circles, &resMutex, &resCount, &wg, p)
 	wg.Wait()
 
 	return nil
@@ -528,6 +526,20 @@ func (p *PairUpdater) subscribeToHeads() {
 	p.blocksSub, err = variables.EthClient.SubscribeNewHead(context.Background(), p.blocksCh)
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to subscribe to the new blocks.")
+	}
+}
+
+// subscribeToPending
+//	Subscribes to the new pending transactions.
+func (p *PairUpdater) subscribeToPending() {
+	// Make new channel.
+	p.pendingCh = make(chan *common.Hash)
+
+	// Subscribe to the new blocks.
+	var err error
+	_, err = variables.RpcClient.EthSubscribe(context.Background(), p.pendingCh, "newPendingTransactions")
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to subscribe to the pending transactions.")
 	}
 }
 
@@ -582,7 +594,7 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 	// Print block latency.
 	if variables.IsDev {
 		go func() {
-			logger.Log.Infoln("Block Latency:", updateTime)
+			logger.Log.Infoln("Block Latency:", updateTime, header.Number.Uint64())
 		}()
 	}
 
@@ -598,6 +610,39 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 			p.OnSort(header, updateTime, p)
 		}
 	}
+}
+
+// listenPending gets triggered on a new pending transaction.
+func (p *PairUpdater) listenPending(hash *common.Hash) {
+	// Get transaction details.
+	transaction, _, err := variables.EthClient.TransactionByHash(context.Background(), *hash)
+	if err != nil {
+		return
+	}
+
+	// Filter out transactions.
+	if transaction == nil || transaction.To() == nil || transaction.Data() == nil {
+		return
+	}
+	if len(transaction.Data()) < 4 {
+		return
+	}
+	if transaction.To().String() == "0x0000000000000000000000000000000000000000" ||
+		transaction.To().String() == "0x000000000000000000000000000000000000dEaD" {
+		return
+	}
+	if transaction.GasPrice().Cmp(variables.GasPrice) < 0 {
+		return
+	}
+
+	// Simulate transaction.
+	receipt, simulationDuration, err := ganache.SimulateTransaction(transaction)
+	if err != nil {
+		logger.Log.WithError(err).Errorln("Unable to simulate tx.")
+		return
+	}
+
+	logger.Log.Infoln(simulationDuration, len(receipt.Logs))
 }
 
 // quickSortCircles
@@ -647,8 +692,8 @@ func (p *PairUpdater) partition(arr []*circle.TradeOption, low, high int) ([]*ci
 
 	for j := low; j < high; j++ {
 		// Get profits.
-		profitOne, err := arr[j].GetProfit()
-		profitTwo, err := pivot.GetProfit()
+		profitOne, err := arr[j].NormalProfit()
+		profitTwo, err := pivot.NormalProfit()
 		if err != nil {
 			logger.Log.WithError(err).Fatalln("Unable to calculate trade profit.")
 		}
@@ -664,7 +709,7 @@ func (p *PairUpdater) partition(arr []*circle.TradeOption, low, high int) ([]*ci
 
 // dfsUtilDynamic
 //	Helper function.
-func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uint64]*circle.Circle, circles *map[uint64]*circle.Circle, resMutex *sync.RWMutex, resCount *int32, wg *sync.WaitGroup, u *PairUpdater) {
+func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circle, resMutex *sync.RWMutex, resCount *int32, wg *sync.WaitGroup, u *PairUpdater) {
 	defer wg.Done()
 
 	// Temporary tokens.
@@ -679,7 +724,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 	// Iterate over token pairs.
 	for _, _pair := range tempInPairs {
 		// Break if already found results.
-		if len(params.Path) > params.MaxHops {
+		if len(params.Route) > config.Parsed.ArbitrageOptions.Limiters.MaxHops {
 			break
 		}
 
@@ -725,7 +770,8 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 		}
 
 		// Check cycle.
-		if bytes.Equal(tempOutToken.Bytes(), params.Path[0].Bytes()) {
+		if len(params.Route) >= config.Parsed.ArbitrageOptions.Limiters.MinHops &&
+			bytes.Equal(tempOutToken.Bytes(), params.Path[0].Bytes()) {
 			// New variables.
 			newPath := make([]common.Address, len(params.Path))
 			newPathSymbols := make([]string, len(params.Symbols))
@@ -767,42 +813,29 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 				PairReserves:  newRouteReserves,
 			}
 
-			// Append to channel.
+			// Check limiter.
 			resMutex.RLock()
-			resultCount := atomic.LoadInt32(resCount)
+			if *resCount > config.Parsed.ArbitrageOptions.Limiters.MaxCircles {
+				resMutex.RUnlock()
+				return
+			}
 			resMutex.RUnlock()
 
-			// Check limiter.
-			if resultCount > int32(params.MaxResultCount) {
-				break
-			}
-
-			// Iterate over routes.
-			resMutex.Lock()
-			for _, pairAddr := range arbCircle.PairAddresses {
-				if _, ok = (*table)[pairAddr]; !ok {
-					(*table)[pairAddr] = make(map[uint64]*circle.Circle, 0)
-				}
-
-				circleId := arbCircle.ID()
-				(*table)[pairAddr][circleId] = arbCircle
-				(*circles)[circleId] = arbCircle
-			}
-
 			// Increase counter.
-			atomic.AddInt32(resCount, 1)
+			resMutex.Lock()
+			circleId := arbCircle.ID()
+			(*circles)[circleId] = arbCircle
+			*resCount += 1
 			resMutex.Unlock()
 		} else {
 			// The params.
 			newParams := DFSCircleParams{
-				MaxHops:        params.MaxHops,
-				MaxResultCount: params.MaxResultCount,
-				Path:           make([]common.Address, len(params.Path)),
-				Symbols:        make([]string, len(params.Symbols)),
-				Route:          make([]common.Address, len(params.Route)),
-				RouteFees:      make([]*big.Int, len(params.Route)),
-				RouteTokens:    make([][]common.Address, len(params.Route)),
-				RouteReserves:  make([][]*big.Int, len(params.Route)),
+				Path:          make([]common.Address, len(params.Path)),
+				Symbols:       make([]string, len(params.Symbols)),
+				Route:         make([]common.Address, len(params.Route)),
+				RouteFees:     make([]*big.Int, len(params.Route)),
+				RouteTokens:   make([][]common.Address, len(params.Route)),
+				RouteReserves: make([][]*big.Int, len(params.Route)),
 			}
 			copy(newParams.Path, params.Path)
 			copy(newParams.Symbols, params.Symbols)
@@ -820,7 +853,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, table *map[common.Address]map[uin
 
 			// Recursive
 			wg.Add(1)
-			go dfsUtilOnlyCircle(newParams, table, circles, resMutex, resCount, wg, u)
+			go dfsUtilOnlyCircle(newParams, circles, resMutex, resCount, wg, u)
 		}
 	}
 }

@@ -7,6 +7,11 @@ import "./libraries/args/FlashloanArgsV2.sol";
 
 import "./libraries/SafeMath.sol";
 
+/// @dev ChiToken interface.
+interface IChiToken {
+    function freeFromUpTo(address from, uint256 value) external;
+}
+
 /// @title FlashloanExecutorV2
 /// @author cool guy (@tarik0)
 /// @notice A helper contract for flashloan swaps.
@@ -67,11 +72,6 @@ contract FlashloanExecutorV2 is FlashloanHooksV1 {
         // Check if someone else triggered.
         require(msg.sender == params.Pairs[0], "FE4");
 
-        // Calculate debt.
-        uint fee = uint256(20000).sub(params.BorrowFee);
-        uint debt = params.AmountsOut[0].mul(fee).div(10000);
-        require(params.AmountsOut[params.AmountsOut.length-1] > debt, "FE5");
-
         // Recursive variables for gas optimization.
         address to;
         uint amount0Out;
@@ -85,7 +85,7 @@ contract FlashloanExecutorV2 is FlashloanHooksV1 {
                 params.AmountsOut[1]
             )
         );
-        require(success, "FE6");
+        require(success, "FE5");
 
         // Iterate over pairs.
         for (uint i = 1; i < params.Pairs.length; i++) {
@@ -107,17 +107,30 @@ contract FlashloanExecutorV2 is FlashloanHooksV1 {
             abi.encodeWithSelector(
                 IERC20.transfer.selector,
                 params.Pairs[0],
-                debt
+                params.PoolDebt
             )
         );
-        require(success, "FE7");
+        require(success, "FE6");
 
         // Return profit.
         (success,) = address(params.Path[0]).call(
             abi.encodeWithSelector(
                 IERC20.transfer.selector,
                 tx.origin,
-                params.AmountsOut[params.AmountsOut.length-1].sub(debt)
+                params.AmountsOut[params.AmountsOut.length-1].sub(params.PoolDebt)
+            )
+        );
+        require(success, "FE7");
+
+        // Stop here if you don't want to use gas token.
+        if (params.GasTokenAmount == 0) return;
+
+        // Burn gas token.
+        (success,) = address(params.GasToken).call(
+            abi.encodeWithSelector(
+                IChiToken.freeFromUpTo.selector,
+                tx.origin,
+                params.GasTokenAmount
             )
         );
         require(success, "FE8");

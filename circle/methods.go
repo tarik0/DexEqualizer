@@ -18,8 +18,8 @@ func (c *Circle) SymbolsStr() string {
 	return strings.Join(c.Symbols, "->")
 }
 
-// GetProfit returns the profit.
-func (t *TradeOption) GetProfit() (*big.Int, error) {
+// NormalProfit returns the profit.
+func (t *TradeOption) NormalProfit() (*big.Int, error) {
 	if t.Circle.Path[0] != t.Circle.Path[len(t.Circle.Path)-1] {
 		return nil, variables.InvalidInput
 	}
@@ -34,25 +34,94 @@ func (t *TradeOption) GetProfit() (*big.Int, error) {
 	return profit, nil
 }
 
-// Gas returns the transaction gas.
-func (t *TradeOption) Gas() uint64 {
-	return uint64(len(t.Circle.Pairs)) * variables.GasPerHopChi
+// LoanProfit returns the flashloan profit.
+func (t *TradeOption) LoanProfit() (*big.Int, error) {
+	// Get normal profit.
+	normalProfit, err := t.NormalProfit()
+	if err != nil {
+		return nil, err
+	}
+
+	// Subtract the loan debt.
+	normalProfit.Sub(normalProfit, t.LoanDebt())
+	return normalProfit, nil
 }
 
-// TriggerProfit returns the minimum amount of profit we need to trigger a swap.
-func (t *TradeOption) TriggerProfit() *big.Int {
-	gasCost := new(big.Int).SetUint64(t.TriggerGas())
+// LoanDebt returns the flashloan debt.
+func (t *TradeOption) LoanDebt() *big.Int {
+	// Calculate loan debt.
+	loanDebt := new(big.Int).Mul(
+		new(big.Int).Sub(variables.Big10000, t.Circle.PairFees[0]),
+		t.AmountsOut[0],
+	)
+	loanDebt.Div(loanDebt, variables.Big10000)
+
+	return loanDebt
+}
+
+// NormalGas returns the transaction gas for a swap.
+func (t *TradeOption) NormalGas() uint64 {
+	swapCost := uint64(len(t.Circle.Pairs)) * variables.NormalGasPerHop
+	return swapCost + variables.LoanChiBurnCost
+}
+
+// LoanGas returns the transaction gas for a flashloan swap.
+func (t *TradeOption) LoanGas() uint64 {
+	swapCost := uint64(len(t.Circle.Pairs)) * (variables.LoanGasPerHop + 35000)
+	return swapCost + variables.LoanChiBurnCost
+}
+
+// NormalTriggerGas returns the maximum amount of gas this circle should use to profit.
+func (t *TradeOption) NormalTriggerGas() uint64 {
+	gas := uint64(len(t.Circle.Pairs)) * variables.NormalGasPerHop
+	gas += variables.NormalChiBurnCost
+	gas -= t.NormalGasTokenAmount() * variables.NormalChiRefundGas
+	return gas
+}
+
+// LoanTriggerGas returns the maximum amount of gas this circle should use to profit.
+func (t *TradeOption) LoanTriggerGas() uint64 {
+	gas := uint64(len(t.Circle.Pairs)) * variables.LoanGasPerHop
+	gas += variables.LoanChiBurnCost
+	gas -= t.LoanGasTokenAmount() * variables.LoanChiRefundGas
+	return gas
+}
+
+// NormalTriggerProfit returns the minimum amount of profit we need to trigger a swap.
+func (t *TradeOption) NormalTriggerProfit() *big.Int {
+	gasCost := new(big.Int).SetUint64(t.NormalTriggerGas())
 	gasCost.Mul(gasCost, variables.GasPrice)
+
+	// Add chi cost.
+	chiCost := new(big.Int).Mul(new(big.Int).SetUint64(t.NormalGasTokenAmount()), variables.ChiCost)
+	gasCost.Add(gasCost, chiCost)
 
 	return gasCost
 }
 
-// TriggerGas returns the maximum amount of gas this circle should use to profit.
-func (t *TradeOption) TriggerGas() uint64 {
-	gas := uint64(len(t.Circle.Pairs)) * variables.GasPerHop
-	gas -= uint64(len(t.Circle.Pairs)+1) * variables.ChiRefundGas
-	gas -= uint64(len(t.Circle.Pairs)-2) * 5000
-	return gas
+// LoanTriggerProfit returns the minimum amount of profit we need to trigger a flashloan swap.
+func (t *TradeOption) LoanTriggerProfit() *big.Int {
+	gasCost := new(big.Int).SetUint64(t.LoanTriggerGas())
+	gasCost.Mul(gasCost, variables.GasPrice)
+
+	// Add chi cost.
+	chiCost := new(big.Int).Mul(new(big.Int).SetUint64(t.LoanGasTokenAmount()), variables.ChiCost)
+	gasCost.Add(gasCost, chiCost)
+
+	// Add loan cost.
+	gasCost.Add(gasCost, t.LoanDebt())
+
+	return gasCost
+}
+
+// NormalGasTokenAmount returns the gas token amount to get used on normal swap.
+func (t *TradeOption) NormalGasTokenAmount() uint64 {
+	return uint64(len(t.Circle.Pairs) * 2)
+}
+
+// LoanGasTokenAmount returns the gas token amount to get used on loan swap.
+func (t *TradeOption) LoanGasTokenAmount() uint64 {
+	return uint64(len(t.Circle.Pairs)*2) + 1
 }
 
 func (t *TradeOption) GetJSON() TradeOptionJSON {
@@ -79,7 +148,7 @@ func (t *TradeOption) GetJSON() TradeOptionJSON {
 		Symbols:      t.Circle.Symbols,
 		Pairs:        pairsStr,
 		AmountsOut:   amountsStr,
-		TriggerLimit: t.TriggerProfit(),
+		TriggerLimit: t.LoanTriggerProfit(),
 	}
 }
 

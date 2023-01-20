@@ -15,8 +15,6 @@ import (
 // Config variables.
 
 var MaxProcessAmount = 10000
-var MaxHops = 3
-var MaxCircleResults = 7000
 
 type OnSortCallback func(header *types.Header, updateTime time.Duration, u *PairUpdater)
 
@@ -26,7 +24,6 @@ type PairUpdater struct {
 	// Token maps.
 	TokenToDecimals map[common.Address]*big.Int
 	TokenToPairs    map[common.Address][]*dexpair.DexPair
-	PairToCircles   map[common.Address]map[uint64]*circle.Circle
 
 	// Pair maps.
 	AddressToPair map[common.Address]*dexpair.DexPair
@@ -48,7 +45,8 @@ type PairUpdater struct {
 	OnSort OnSortCallback
 
 	// Channels.
-	blocksCh chan *types.Header
+	blocksCh  chan *types.Header
+	pendingCh chan *common.Hash
 
 	// Subscriptions
 	// logsSub   ethereum.Subscription
@@ -90,14 +88,12 @@ type PairUpdaterParams struct {
 // DFSCircleParams
 //	Helper struct to make recursive things easier.
 type DFSCircleParams struct {
-	MaxResultCount int
-	MaxHops        int
-	Path           []common.Address
-	Symbols        []string
-	Route          []common.Address
-	RouteFees      []*big.Int
-	RouteTokens    [][]common.Address
-	RouteReserves  [][]*big.Int
+	Path          []common.Address
+	Symbols       []string
+	Route         []common.Address
+	RouteFees     []*big.Int
+	RouteTokens   [][]common.Address
+	RouteReserves [][]*big.Int
 }
 
 // NewPairUpdater

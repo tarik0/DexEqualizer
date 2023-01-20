@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -15,6 +16,7 @@ import (
 	"github.com/tarik0/DexEqualizer/addresses"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
+	"github.com/tarik0/DexEqualizer/ganache"
 	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/monitor"
 	"github.com/tarik0/DexEqualizer/updater"
@@ -30,6 +32,11 @@ import (
 	"time"
 )
 
+// TODO 2 - Check if flashloan is profitable.
+// TODO 3 - Tune Chi usage.
+// TODO 4 - Implement a gas updater that monitors pending transactions.
+// TODO 5 - Implement a token updater.
+
 // The webserver hub.
 
 var hub *ws.Hub
@@ -41,6 +48,21 @@ func main() {
 
 	// Is development.
 	variables.IsDev = os.Getenv("IS_DEV") == "true"
+
+	// Start ganache.
+	logger.Log.Infoln("Starting the forked network...")
+	name, err := ganache.StartGanache(RPCUrl, 3131)
+	if err != nil {
+		logger.Log.WithError(errors.New(name)).Errorln("Unable to start Ganache forked network. Skipping...")
+	}
+
+	// Connect to ganache.
+	variables.GanacheRpcClient, err = rpc.Dial("ws://127.0.0.1:3131")
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to connect to the Ganache RPC.")
+	}
+	variables.GanacheClient = ethclient.NewClient(variables.GanacheRpcClient)
+	logger.Log.WithField("name", name).Infoln("Ganache forked network started!")
 
 	// Connect to the RPC.
 	logger.Log.WithField("rpc", RPCUrl).Infoln("Connecting to the RPC...")
@@ -80,7 +102,7 @@ func main() {
 	//////////////////////////////////////////////
 
 	// Load flashloan executor.
-	variables.SwapExec, err = abis.NewSwapExecutorV2(config.Parsed.Contracts.Executor, variables.EthClient)
+	variables.LoanExec, err = abis.NewFlashloanExecutorV2(config.Parsed.Contracts.Executor, variables.EthClient)
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to load flashloan executor.")
 	}
@@ -219,7 +241,10 @@ func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdat
 		go func() {
 			circleGases, avgGas, errs := estimateCircles(options)
 			for i, _ := range circleGases {
-				if errs[i] != nil && fmt.Sprint(errs[i]) != "execution reverted: SE2" {
+				if errs[i] != nil &&
+					fmt.Sprint(errs[i]) != "execution reverted: SE2" &&
+					fmt.Sprint(errs[i]) != "execution reverted: FE2" &&
+					fmt.Sprint(errs[i]) != "execution reverted: FE6" {
 					utils.PrintTradeOption(options[i])
 					logger.Log.WithError(errs[i]).Fatalln("Circle failed the simulation.")
 				}
@@ -231,8 +256,8 @@ func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdat
 	// Check circles.
 	for _, swapCircle := range options {
 		// Check if profitable.
-		profit, _ := swapCircle.GetProfit()
-		triggerLim := swapCircle.TriggerProfit()
+		profit, _ := swapCircle.LoanProfit()
+		triggerLim := swapCircle.LoanTriggerProfit()
 		if profit.Cmp(triggerLim) < 0 {
 			return
 		}
@@ -279,14 +304,15 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 	// Iterate over circles.
 	for i, swapCircle := range swapCircles {
 		// The parameters.
-		param := abis.SwapParameters{
+		param := abis.FlashloanParameters{
 			Pairs:                 swapCircle.Circle.PairAddresses,
 			Reserves:              swapCircle.Circle.PairReserves,
 			Path:                  swapCircle.Circle.Path,
 			AmountsOut:            swapCircle.AmountsOut,
 			PairTokens:            swapCircle.Circle.PairTokens,
 			GasToken:              config.Parsed.Contracts.GasToken,
-			UseGasToken:           true,
+			GasTokenAmount:        new(big.Int).SetUint64(swapCircle.LoanGasTokenAmount()),
+			PoolDebt:              new(big.Int).Add(swapCircle.AmountsOut[0], swapCircle.LoanDebt()),
 			RevertOnReserveChange: true,
 		}
 
@@ -294,7 +320,7 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 		i := i
 		go func() {
 			// Execute flashloan.
-			tx, err := variables.SwapExec.ExecuteSwap(transactor, param)
+			tx, err := variables.LoanExec.ExecuteFlashloan(transactor, param)
 			if err != nil {
 				ch <- struct {
 					Id       int
@@ -386,22 +412,23 @@ func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int) 
 	// Set transactor values.
 	transactor.GasPrice = variables.GasPrice
 	transactor.Value = common.Big0
-	transactor.GasLimit = swapCircle.Gas()
+	transactor.GasLimit = swapCircle.LoanGas()
 
 	// The parameter.
-	param := abis.SwapParameters{
+	param := abis.FlashloanParameters{
 		Pairs:                 swapCircle.Circle.PairAddresses,
 		Reserves:              swapCircle.Circle.PairReserves,
 		Path:                  swapCircle.Circle.Path,
 		AmountsOut:            swapCircle.AmountsOut,
 		PairTokens:            swapCircle.Circle.PairTokens,
 		GasToken:              config.Parsed.Contracts.GasToken,
-		UseGasToken:           true,
+		GasTokenAmount:        new(big.Int).SetUint64(swapCircle.LoanGasTokenAmount()),
+		PoolDebt:              new(big.Int).Add(swapCircle.AmountsOut[0], swapCircle.LoanDebt()),
 		RevertOnReserveChange: true,
 	}
 
 	// Send transaction.
-	tx, err := variables.SwapExec.ExecuteSwap(transactor, param)
+	tx, err := variables.LoanExec.ExecuteFlashloan(transactor, param)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
 			"circle": swapCircle.GetJSON(),
@@ -413,13 +440,9 @@ func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int) 
 	logger.Log.WithFields(logrus.Fields{
 		"hash":          tx.Hash().String(),
 		"circle":        swapCircle.GetJSON(),
-		"gasCalculated": fmt.Sprintf("%.18f BNB", utils.WeiToEthers(swapCircle.TriggerProfit())),
-		"gasUsed":       swapCircle.TriggerGas(),
+		"gasCalculated": fmt.Sprintf("%.18f BNB", utils.WeiToEthers(swapCircle.LoanTriggerProfit())),
+		"gasUsed":       swapCircle.LoanTriggerGas(),
 	}).Infoln("Arbitrage transaction sent!")
-
-	if variables.IsDev {
-		logger.Log.Fatalln("Stopped for inspecting.")
-	}
 }
 
 // checkBalance checks the wallet balance and stops when too low.

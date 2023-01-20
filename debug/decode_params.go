@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	rawAbi := abis.SwapExecutorV2MetaData.ABI
+	rawAbi := abis.FlashloanExecutorV2MetaData.ABI
 	execAbi, err := abi.JSON(strings.NewReader(rawAbi))
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to load flashloan executor abi.")
@@ -27,7 +27,7 @@ func main() {
 		logger.Log.WithError(err).Fatalln("Unable to decode parameters.")
 	}
 
-	params, err := execAbi.Methods["executeSwap"].Inputs.Unpack(paramsBytes)
+	params, err := execAbi.Methods["executeFlashloan"].Inputs.Unpack(paramsBytes)
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to unpack parameters.")
 	}
@@ -38,9 +38,10 @@ func main() {
 		PairTokens            [][]common.Address "json:\"PairTokens\""
 		Path                  []common.Address   "json:\"Path\""
 		AmountsOut            []*big.Int         "json:\"AmountsOut\""
-		RevertOnReserveChange bool               "json:\"RevertOnReserveChange\""
 		GasToken              common.Address     "json:\"GasToken\""
-		UseGasToken           bool               "json:\"UseGasToken\""
+		GasTokenAmount        *big.Int           "json:\"GasTokenAmount\""
+		PoolDebt              *big.Int           "json:\"PoolDebt\""
+		RevertOnReserveChange bool               "json:\"RevertOnReserveChange\""
 	})
 
 	logger.Log.Infoln("Pairs:")
@@ -76,6 +77,11 @@ func main() {
 	}
 
 	logger.Log.Infoln("")
-	logger.Log.Infoln("Use Gas Token:", tx_param.UseGasToken)
+	logger.Log.Infoln("Gas Token Amount:", tx_param.GasTokenAmount)
 	logger.Log.Infoln("Gas Token:", tx_param.GasToken.String())
+
+	tx_param.GasTokenAmount.Add(tx_param.GasTokenAmount, big.NewInt(6))
+
+	tmp, _ := execAbi.Methods["executeFlashloan"].Inputs.Pack(tx_param)
+	logger.Log.Infoln(hex.EncodeToString(tmp))
 }
