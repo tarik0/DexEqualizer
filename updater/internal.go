@@ -645,12 +645,14 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 	}
 
 	// Skip if no history.
-	p.TxHistoryMutex.RLock()
-	if len(p.TxToOptionHistory) == 0 {
+	if !variables.IsDev {
+		p.TxHistoryMutex.RLock()
+		if len(p.TxToOptionHistory) == 0 {
+			p.TxHistoryMutex.RUnlock()
+			return
+		}
 		p.TxHistoryMutex.RUnlock()
-		return
 	}
-	p.TxHistoryMutex.RUnlock()
 
 	// Get from.
 	msg, err := transaction.AsMessage(types.LatestSignerForChainID(variables.ChainId), big.NewInt(1))
@@ -678,7 +680,7 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 	options["disableStorage"] = true
 	options["disableStack"] = false
 	options["enableMemory"] = false
-	options["timeout"] = "300ms"
+	options["timeout"] = "150ms"
 
 	// Trace as call.
 	var traceCallRes DebugTraceCall
@@ -687,11 +689,11 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 		logger.Log.
 			WithError(err).
 			WithField("hash", transaction.Hash().String()).
-			Debugln("Unable to simulate transaction.")
+			Errorln("Unable to simulate transaction.")
 		return
 	}
 
-	// Iterate over trace call.
+	// Iterate over trace call
 	isSyncFound := false
 	isPairFound := false
 	var pairAddress common.Address
@@ -751,7 +753,6 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 
 	// Re-send the transaction.
 	if tradeTxes, ok := p.PairToTxHistory[pairAddress]; ok {
-
 		for i, tradeTx := range tradeTxes {
 			// Continue if gas price is more.
 			if tradeTx.GasPrice().Cmp(transaction.GasPrice()) > 0 {
@@ -759,7 +760,7 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 			}
 
 			// Get the options.
-			tradeOptions := p.TxToOptionHistory[tradeTx.Hash()]
+			tradeOption := p.TxToOptionHistory[tradeTx.Hash()]
 
 			// Calculate the frontrun gas cost. (%15 more gas.)
 			frontrunGasPrice := new(big.Int).Mul(transaction.GasPrice(), big.NewInt(115))
@@ -769,7 +770,12 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 			frontrunGasCost := new(big.Int).Mul(new(big.Int).SetUint64(transaction.Gas()), frontrunGasPrice)
 
 			// Calculate the profit of the option.
-			tradeProfit, _ := tradeOptions.LoanProfit()
+			tradeProfit, err := tradeOption.LoanProfit()
+			if err != nil {
+				utils.PrintTradeOption(tradeOption)
+				logger.Log.WithError(err).Errorln("Unable to calculate trade option's profit.")
+				continue
+			}
 
 			// Log fields.
 			logFields := logrus.Fields{
@@ -786,6 +792,9 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 
 				// Increase the gas price and resend transaction again.
 				replacedTx = p.increaseTxGasPrice(tradeTx, frontrunGasPrice)
+
+				// Replace.
+				p.PairToTxHistory[pairAddress][i] = replacedTx
 			} else {
 				logger.Log.WithFields(logFields).Infoln("Trade transaction is not profitable anymore! Cancelling transaction...")
 
@@ -794,11 +803,11 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 				cancelGasPrice.Div(cancelGasPrice, big.NewInt(100))
 
 				// Frontrun your own transaction and replace it with blank tx.
-				replacedTx = p.cancelTx(tradeTx, cancelGasPrice)
-			}
+				p.cancelTx(tradeTx, cancelGasPrice)
 
-			// Replace.
-			p.PairToTxHistory[pairAddress][i] = replacedTx
+				// Delete from history.
+				p.PairToTxHistory[pairAddress] = append(p.PairToTxHistory[pairAddress][:i], p.PairToTxHistory[pairAddress][i+1:]...)
+			}
 		}
 	}
 
@@ -929,9 +938,15 @@ func (p *PairUpdater) partition(arr []*circle.TradeOption, low, high int) ([]*ci
 
 	for j := low; j < high; j++ {
 		// Get profits.
-		profitOne, err := arr[j].NormalProfit()
-		profitTwo, err := pivot.NormalProfit()
+		profitOne, err := arr[j].LoanProfit()
 		if err != nil {
+			utils.PrintTradeOption(arr[j])
+			logger.Log.WithError(err).Fatalln("Unable to calculate trade profit.")
+		}
+
+		profitTwo, err := pivot.LoanProfit()
+		if err != nil {
+			utils.PrintTradeOption(pivot)
 			logger.Log.WithError(err).Fatalln("Unable to calculate trade profit.")
 		}
 

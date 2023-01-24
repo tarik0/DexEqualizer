@@ -1,6 +1,7 @@
 package circle
 
 import (
+	"bytes"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/segmentio/fasthash/fnv1a"
 	"github.com/tarik0/DexEqualizer/variables"
@@ -20,7 +21,7 @@ func (c *Circle) SymbolsStr() string {
 
 // NormalProfit returns the profit.
 func (t *TradeOption) NormalProfit() (*big.Int, error) {
-	if t.Circle.Path[0] != t.Circle.Path[len(t.Circle.Path)-1] {
+	if !bytes.Equal(t.Circle.Path[0].Bytes(), t.Circle.Path[len(t.Circle.Path)-1].Bytes()) {
 		return nil, variables.InvalidInput
 	}
 

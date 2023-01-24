@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/brahma-adshonor/gohook"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/gorilla/websocket"
 	_ "github.com/gosuri/uilive"
 	"github.com/sirupsen/logrus"
 	"github.com/tarik0/DexEqualizer/abis"
@@ -28,16 +30,43 @@ import (
 	"os"
 	_ "sync"
 	"time"
+	_ "unsafe"
 )
 
 // The webserver hub.
 
 var hub *ws.Hub
 
+// wsMessageSizeLimit is 50 MB
+const wsMessageSizeLimit = 50 * 1024 * 1024
+
+//go:linkname newWebsocketCodec github.com/ethereum/go-ethereum/rpc.newWebsocketCodec
+func newWebsocketCodec(*websocket.Conn, string, http.Header) rpc.ServerCodec
+
+// newWebsocketCodecHook is a hook for the newWebsocketCodec.
+func newWebsocketCodecHook(conn *websocket.Conn, host string, req http.Header) rpc.ServerCodec {
+	codec := newWebsocketCodecTramp(conn, host, req)
+	conn.SetReadLimit(wsMessageSizeLimit)
+	return codec
+}
+
+// newWebsocketCodecTramp is a tramp for the newWebsocketCodec.
+func newWebsocketCodecTramp(*websocket.Conn, string, http.Header) rpc.ServerCodec {
+	for {
+		panic("hooking failed")
+	}
+}
+
 func main() {
 	// The rpc.
 	var err error
 	RPCUrl := os.Args[1]
+
+	// Hook the websocket.
+	err = gohook.HookByIndirectJmp(newWebsocketCodec, newWebsocketCodecHook, newWebsocketCodecTramp)
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to hook newWebsocketCodec.")
+	}
 
 	// Is development.
 	variables.IsDev = os.Getenv("IS_DEV") == "true"
@@ -47,7 +76,7 @@ func main() {
 
 	// Connect to the RPC.
 	logger.Log.WithField("rpc", RPCUrl).Infoln("Connecting to the RPC...")
-	variables.RpcClient, err = rpc.Dial(os.Args[1])
+	variables.RpcClient, err = rpc.DialWebsocket(context.Background(), os.Args[1], "")
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to connect to the RPC.")
 	}
@@ -59,6 +88,26 @@ func main() {
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to get chain id.")
 	}
+
+	//////////////////////////////////////////////
+
+	/*
+		endpoint, header, err := wsClientHeaders(endpoint, origin)
+		if err != nil {
+			return nil, err
+		}
+		return newClient(ctx, func(ctx context.Context) (ServerCodec, error) {
+			conn, resp, err := dialer.DialContext(ctx, endpoint, header)
+			if err != nil {
+				hErr := wsHandshakeError{err: err}
+				if resp != nil {
+					hErr.status = resp.Status
+				}
+				return nil, hErr
+			}
+			return newWebsocketCodec(conn, endpoint, header), nil
+		})
+	*/
 
 	//////////////////////////////////////////////
 
