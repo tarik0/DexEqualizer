@@ -3,12 +3,15 @@ package updater
 import (
 	"context"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
 	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/utils"
 	"github.com/tarik0/DexEqualizer/variables"
+	"golang.org/x/exp/maps"
 	"math/big"
+	"sync"
 )
 
 // Start
@@ -38,6 +41,9 @@ func (p *PairUpdater) Start() error {
 		return err
 	}
 
+	// Map keys.
+	p.PairAddresses = maps.Keys(p.AddressToPair)
+
 	// Find pair reserves.
 	err = p.findReserves()
 	if err != nil {
@@ -66,10 +72,14 @@ func (p *PairUpdater) Start() error {
 	}
 	p.lastBlockNum.Store(blockNum)
 
+	// The history of this block.
+	p.TxHistoryMutex = new(sync.RWMutex)
+	p.PairToTxHistory = make(map[common.Address][]*types.Transaction)
+	p.TxToOptionHistory = make(map[common.Hash]*circle.TradeOption)
+
 	// Start listening for new heads.
 	go func() {
 		var err error
-
 		for {
 			select {
 			case err = <-p.blocksSub.Err():
@@ -91,9 +101,15 @@ func (p *PairUpdater) Start() error {
 	go func() {
 		for {
 			select {
+			case err = <-p.pendingSub.Err():
+				// Disconnected, retry.
+				close(p.pendingCh)
+				logger.Log.WithError(err).Errorln("Disconnected from the new pending transactions! Reconnecting...")
+				p.subscribeToPending()
+				logger.Log.WithError(err).Errorln("Connected back to the new pending transactions!")
 			case hash := <-p.pendingCh:
 				if hash != nil {
-					go p.listenPending(hash)
+					p.listenPending(hash)
 				}
 			}
 		}
@@ -398,4 +414,14 @@ func (p *PairUpdater) GetAmountsOut(
 	}
 
 	return amountsOut, nil
+}
+
+// GetLatestBlock returns the latest block.
+func (p *PairUpdater) GetLatestBlock() (uint64, error) {
+	pointer := p.lastBlockNum.Load()
+	if pointer == nil {
+		return 0, variables.InvalidInput
+	}
+
+	return pointer.(uint64), nil
 }

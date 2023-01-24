@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -16,7 +15,6 @@ import (
 	"github.com/tarik0/DexEqualizer/addresses"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
-	"github.com/tarik0/DexEqualizer/ganache"
 	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/monitor"
 	"github.com/tarik0/DexEqualizer/updater"
@@ -32,11 +30,6 @@ import (
 	"time"
 )
 
-// TODO 2 - Check if flashloan is profitable.
-// TODO 3 - Tune Chi usage.
-// TODO 4 - Implement a gas updater that monitors pending transactions.
-// TODO 5 - Implement a token updater.
-
 // The webserver hub.
 
 var hub *ws.Hub
@@ -48,25 +41,13 @@ func main() {
 
 	// Is development.
 	variables.IsDev = os.Getenv("IS_DEV") == "true"
-
-	// Start ganache.
-	logger.Log.Infoln("Starting the forked network...")
-	name, err := ganache.StartGanache(RPCUrl, 3131)
-	if err != nil {
-		logger.Log.WithError(errors.New(name)).Errorln("Unable to start Ganache forked network. Skipping...")
+	if variables.IsDev {
+		logger.Log.Level = logrus.DebugLevel
 	}
-
-	// Connect to ganache.
-	variables.GanacheRpcClient, err = rpc.Dial("ws://127.0.0.1:3131")
-	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to connect to the Ganache RPC.")
-	}
-	variables.GanacheClient = ethclient.NewClient(variables.GanacheRpcClient)
-	logger.Log.WithField("name", name).Infoln("Ganache forked network started!")
 
 	// Connect to the RPC.
 	logger.Log.WithField("rpc", RPCUrl).Infoln("Connecting to the RPC...")
-	variables.RpcClient, err = rpc.Dial(RPCUrl)
+	variables.RpcClient, err = rpc.Dial(os.Args[1])
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to connect to the RPC.")
 	}
@@ -115,6 +96,12 @@ func main() {
 
 	//////////////////////////////////////////////
 
+	// Connect RPC client agan. (to increase read limit.)
+	simulationClient, err := rpc.Dial(os.Args[1])
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to connect to the RPC.")
+	}
+
 	// The updater.
 	u := updater.NewPairUpdater(
 		&updater.PairUpdaterParams{
@@ -145,6 +132,7 @@ func main() {
 			},
 		},
 		variables.EthClient,
+		simulationClient,
 	)
 
 	logger.Log.Infoln("")
@@ -156,8 +144,8 @@ func main() {
 	logger.Log.Infoln("")
 
 	if variables.IsDev {
-		logger.Log.Infoln("Development mode activated!")
-		logger.Log.Infoln("")
+		logger.Log.Debugln("Development mode activated!")
+		logger.Log.Debugln("")
 	}
 
 	// Start web server.
@@ -249,7 +237,7 @@ func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdat
 					logger.Log.WithError(errs[i]).Fatalln("Circle failed the simulation.")
 				}
 			}
-			logger.Log.Infoln("Avg Gas Per Hop:", avgGas)
+			logger.Log.Debugln("Avg Gas Per Hop:", avgGas)
 		}()
 	}
 
@@ -278,7 +266,7 @@ func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdat
 		}
 
 		// Trigger the best swap.
-		triggerSwap(swapCircle, triggerLim, profit)
+		triggerSwap(swapCircle, triggerLim, profit, u)
 		break
 	}
 }
@@ -368,7 +356,7 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 }
 
 // triggerSwap triggers a new swap with circle.
-func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int) {
+func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int, u *updater.PairUpdater) {
 	// Broadcast buy.
 	go func() {
 		// Encoder.
@@ -435,6 +423,24 @@ func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int) 
 		}).WithError(err).Errorln("Unable to estimate gas for the transaction.")
 		return
 	}
+
+	// Lock the history mutex.
+	u.TxHistoryMutex.Lock()
+
+	// Iterate over pair addresses.
+	for _, addr := range swapCircle.Circle.PairAddresses {
+		// Generate new map if not found.
+		if _, ok := u.PairToTxHistory[addr]; !ok {
+			u.PairToTxHistory[addr] = make([]*types.Transaction, 0)
+		}
+
+		// Append to the history.
+		u.PairToTxHistory[addr] = append(u.PairToTxHistory[addr], tx)
+		u.TxToOptionHistory[tx.Hash()] = swapCircle
+	}
+
+	// Unlock the history mutex.
+	u.TxHistoryMutex.Unlock()
 
 	// Log transaction.
 	logger.Log.WithFields(logrus.Fields{

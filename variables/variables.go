@@ -31,9 +31,6 @@ var EthClient *ethclient.Client
 var RpcClient *rpc.Client
 var ChainId *big.Int
 
-var GanacheClient *ethclient.Client
-var GanacheRpcClient *rpc.Client
-
 // The wallet.
 
 var Wallet *wallet.Wallet

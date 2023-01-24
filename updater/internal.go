@@ -3,18 +3,20 @@ package updater
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"fmt"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/sirupsen/logrus"
 	"github.com/tarik0/DexEqualizer/abis"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
 	"github.com/tarik0/DexEqualizer/dexpair"
-	"github.com/tarik0/DexEqualizer/ganache"
 	"github.com/tarik0/DexEqualizer/logger"
+	"github.com/tarik0/DexEqualizer/utils"
 	"github.com/tarik0/DexEqualizer/variables"
-	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 	"math/big"
 	"strings"
@@ -31,6 +33,7 @@ var pairAbi, _ = abi.JSON(strings.NewReader(abis.PairMetaData.ABI))
 var erc20Abi, _ = abi.JSON(strings.NewReader(abis.ERC20MetaData.ABI))
 
 var syncId = pairAbi.Events["Sync"].ID
+var transferId = erc20Abi.Events["Transfer"].ID
 
 // findFactories
 // 	Finds the factory addresses from the routers.
@@ -537,7 +540,7 @@ func (p *PairUpdater) subscribeToPending() {
 
 	// Subscribe to the new blocks.
 	var err error
-	_, err = variables.RpcClient.EthSubscribe(context.Background(), p.pendingCh, "newPendingTransactions")
+	p.pendingSub, err = variables.RpcClient.EthSubscribe(context.Background(), p.pendingCh, "newPendingTransactions")
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to subscribe to the pending transactions.")
 	}
@@ -551,7 +554,7 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 
 	// Get the previous 3 block's logs.
 	prevLogs, err := p.backend.FilterLogs(context.Background(), ethereum.FilterQuery{
-		Addresses: maps.Keys(p.AddressToPair),
+		Addresses: p.PairAddresses,
 		FromBlock: new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64)),
 		ToBlock:   header.Number,
 	})
@@ -588,13 +591,19 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 	// Update block number.
 	p.lastBlockNum.Swap(header.Number.Uint64())
 
+	// Clear the transaction history.
+	p.TxHistoryMutex.Lock()
+	p.PairToTxHistory = make(map[common.Address][]*types.Transaction)
+	p.TxToOptionHistory = make(map[common.Hash]*circle.TradeOption)
+	p.TxHistoryMutex.Unlock()
+
 	// Set update time.
 	updateTime := time.Since(start)
 
 	// Print block latency.
 	if variables.IsDev {
 		go func() {
-			logger.Log.Infoln("Block Latency:", updateTime, header.Number.Uint64())
+			logger.Log.Debugln("Block Latency:", updateTime, header.Number.Uint64())
 		}()
 	}
 
@@ -615,8 +624,8 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 // listenPending gets triggered on a new pending transaction.
 func (p *PairUpdater) listenPending(hash *common.Hash) {
 	// Get transaction details.
-	transaction, _, err := variables.EthClient.TransactionByHash(context.Background(), *hash)
-	if err != nil {
+	transaction, isPending, err := variables.EthClient.TransactionByHash(context.Background(), *hash)
+	if err != nil || !isPending {
 		return
 	}
 
@@ -635,14 +644,242 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 		return
 	}
 
-	// Simulate transaction.
-	receipt, simulationDuration, err := ganache.SimulateTransaction(transaction)
+	// Skip if no history.
+	p.TxHistoryMutex.RLock()
+	if len(p.TxToOptionHistory) == 0 {
+		p.TxHistoryMutex.RUnlock()
+		return
+	}
+	p.TxHistoryMutex.RUnlock()
+
+	// Get from.
+	msg, err := transaction.AsMessage(types.LatestSignerForChainID(variables.ChainId), big.NewInt(1))
 	if err != nil {
-		logger.Log.WithError(err).Errorln("Unable to simulate tx.")
 		return
 	}
 
-	logger.Log.Infoln(simulationDuration, len(receipt.Logs))
+	// Skip our transactions.
+	if bytes.Equal(msg.From().Bytes(), variables.Wallet.Address().Bytes()) {
+		return
+	}
+
+	// Marshall tx.
+	simulationTx := make(map[string]string)
+	simulationTx["from"] = msg.From().String()
+	simulationTx["to"] = transaction.To().String()
+	simulationTx["gas"] = fmt.Sprintf("0x%x", transaction.Gas())
+	simulationTx["gasPrice"] = fmt.Sprintf("0x%x", transaction.GasPrice())
+	simulationTx["value"] = fmt.Sprintf("0x%x", transaction.Value())
+	simulationTx["data"] = "0x" + hex.EncodeToString(transaction.Data())
+	simulationTx["nonce"] = fmt.Sprintf("0x%x", transaction.Nonce())
+
+	// Options.
+	options := make(map[string]interface{})
+	options["disableStorage"] = true
+	options["disableStack"] = false
+	options["enableMemory"] = false
+	options["timeout"] = "300ms"
+
+	// Trace as call.
+	var traceCallRes DebugTraceCall
+	err = p.rpcBackend.Call(&traceCallRes, "debug_traceCall", simulationTx, "latest", options)
+	if err != nil {
+		logger.Log.
+			WithError(err).
+			WithField("hash", transaction.Hash().String()).
+			Debugln("Unable to simulate transaction.")
+		return
+	}
+
+	// Iterate over trace call.
+	isSyncFound := false
+	isPairFound := false
+	var pairAddress common.Address
+	for i, structLog := range traceCallRes.StructLogs {
+		// Break if already found.
+		if isSyncFound && isPairFound {
+			break
+		}
+
+		// Check stack size.
+		if i+2 > len(traceCallRes.StructLogs) || len(traceCallRes.StructLogs[i+1].Stack) < 3 {
+			continue
+		}
+
+		// Catch events.
+		if structLog.Op == "PUSH32" {
+			// Get the pushed event id.
+			eventId := traceCallRes.StructLogs[i+1].Stack[len(traceCallRes.StructLogs[i+1].Stack)-1]
+
+			// Check if it's a "Sync" event.
+			if strings.EqualFold(eventId, syncId.String()) {
+				isSyncFound = true
+				continue
+			}
+
+			// Check if it's a "Transfer" event.
+			if strings.EqualFold(eventId, transferId.String()) {
+				// Get the addresses.
+				fromAddrRaw := traceCallRes.StructLogs[i+1].Stack[len(traceCallRes.StructLogs[i+1].Stack)-2]
+				toAddrRaw := traceCallRes.StructLogs[i+1].Stack[len(traceCallRes.StructLogs[i+1].Stack)-3]
+
+				// Skip if addresses are invalid.
+				if !common.IsHexAddress(fromAddrRaw) || !common.IsHexAddress(toAddrRaw) {
+					continue
+				}
+
+				// Check if any of the addresses are pair addresses.
+				fromAddr, toAddr := common.HexToAddress(fromAddrRaw), common.HexToAddress(toAddrRaw)
+				if slices.Contains(p.PairAddresses, fromAddr) {
+					isPairFound = true
+					pairAddress = fromAddr
+				} else if slices.Contains(p.PairAddresses, toAddr) {
+					isPairFound = true
+					pairAddress = toAddr
+				}
+			}
+		}
+	}
+
+	// Check if it's a swap that includes our pairs.
+	if !isPairFound || !isSyncFound {
+		return
+	}
+
+	// Lock the mutex.
+	p.TxHistoryMutex.Lock()
+
+	// Re-send the transaction.
+	if tradeTxes, ok := p.PairToTxHistory[pairAddress]; ok {
+
+		for i, tradeTx := range tradeTxes {
+			// Continue if gas price is more.
+			if tradeTx.GasPrice().Cmp(transaction.GasPrice()) > 0 {
+				continue
+			}
+
+			// Get the options.
+			tradeOptions := p.TxToOptionHistory[tradeTx.Hash()]
+
+			// Calculate the frontrun gas cost. (%15 more gas.)
+			frontrunGasPrice := new(big.Int).Mul(transaction.GasPrice(), big.NewInt(115))
+			frontrunGasPrice.Div(frontrunGasPrice, big.NewInt(100))
+
+			// The frontrun gas cost. (gas price * gas)
+			frontrunGasCost := new(big.Int).Mul(new(big.Int).SetUint64(transaction.Gas()), frontrunGasPrice)
+
+			// Calculate the profit of the option.
+			tradeProfit, _ := tradeOptions.LoanProfit()
+
+			// Log fields.
+			logFields := logrus.Fields{
+				"targetTx":        transaction.Hash(),
+				"ourTx":           tradeTx.Hash(),
+				"pairAddr":        pairAddress,
+				"updatedGasPrice": fmt.Sprintf("%.3f Gwei", utils.WeiToUnit(frontrunGasPrice, big.NewInt(9))),
+			}
+
+			// Check if we are still in profit.
+			var replacedTx *types.Transaction
+			if tradeProfit.Cmp(frontrunGasCost) > 0 {
+				logger.Log.WithFields(logFields).Infoln("Updating trade transaction to frontrun competitors...")
+
+				// Increase the gas price and resend transaction again.
+				replacedTx = p.increaseTxGasPrice(tradeTx, frontrunGasPrice)
+			} else {
+				logger.Log.WithFields(logFields).Infoln("Trade transaction is not profitable anymore! Cancelling transaction...")
+
+				// Calculate the cancel gas cost. (%15 more gas.)
+				cancelGasPrice := new(big.Int).Mul(tradeTx.GasPrice(), big.NewInt(115))
+				cancelGasPrice.Div(cancelGasPrice, big.NewInt(100))
+
+				// Frontrun your own transaction and replace it with blank tx.
+				replacedTx = p.cancelTx(tradeTx, cancelGasPrice)
+			}
+
+			// Replace.
+			p.PairToTxHistory[pairAddress][i] = replacedTx
+		}
+	}
+
+	// Unlock the mutex.
+	p.TxHistoryMutex.Unlock()
+}
+
+// increaseTxGasPrice
+//	Increases the transaction's gas price and re-sends it again.
+func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, targetGasPrice *big.Int) *types.Transaction {
+	// Replace transaction.
+	replaceTransaction := types.NewTx(&types.LegacyTx{
+		Nonce:    tx.Nonce(),
+		To:       tx.To(),
+		Value:    tx.Value(),
+		Gas:      tx.Gas(),
+		GasPrice: targetGasPrice,
+		Data:     tx.Data(),
+	})
+
+	// New signer.
+	signer, _ := variables.Wallet.NewTransactor()
+
+	// Sign transaction.
+	signedTx, err := signer.Signer(signer.From, replaceTransaction)
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to sign replacement transaction.")
+	}
+
+	// Send the transaction.
+	err = p.backend.SendTransaction(context.Background(), signedTx)
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to send replacement transaction..")
+	}
+
+	logger.Log.WithFields(logrus.Fields{
+		"replacedTx":      signedTx.Hash(),
+		"updatedGasPrice": fmt.Sprintf("%.3f Gwei", utils.WeiToUnit(targetGasPrice, big.NewInt(9))),
+	}).Infoln("Replacement transaction sent!")
+
+	return signedTx
+	// TODO: broadcast message
+}
+
+// cancelTx
+//	Increases the transaction's gas price and replaces it with blank transaction.
+func (p *PairUpdater) cancelTx(tx *types.Transaction, targetGasPrice *big.Int) *types.Transaction {
+	walletAddr := variables.Wallet.Address()
+
+	// Blank transaction.
+	blankTx := types.NewTx(&types.LegacyTx{
+		Nonce:    tx.Nonce(),
+		To:       &walletAddr,
+		Value:    common.Big0,
+		Gas:      21000,
+		GasPrice: targetGasPrice,
+		Data:     make([]byte, 0),
+	})
+
+	// New signer.
+	signer, _ := variables.Wallet.NewTransactor()
+
+	// Sign transaction.
+	signedTx, err := signer.Signer(signer.From, blankTx)
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to sign blank transaction.")
+	}
+
+	// Send the transaction.
+	err = p.backend.SendTransaction(context.Background(), signedTx)
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to send blank transaction..")
+	}
+
+	logger.Log.WithFields(logrus.Fields{
+		"replacedTx":      signedTx.Hash(),
+		"updatedGasPrice": fmt.Sprintf("%.3f Gwei", utils.WeiToUnit(targetGasPrice, big.NewInt(9))),
+	}).Infoln("Blank transaction sent!")
+
+	// TODO: broadcast message
+	return signedTx
 }
 
 // quickSortCircles

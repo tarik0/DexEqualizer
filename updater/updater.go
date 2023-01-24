@@ -5,9 +5,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/dexpair"
 	"math/big"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,6 +29,7 @@ type PairUpdater struct {
 
 	// Pair maps.
 	AddressToPair map[common.Address]*dexpair.DexPair
+	PairAddresses []common.Address
 	PairToTokens  map[common.Address][]common.Address
 	PairToFactory map[common.Address]common.Address
 
@@ -49,16 +52,22 @@ type PairUpdater struct {
 	pendingCh chan *common.Hash
 
 	// Subscriptions
-	// logsSub   ethereum.Subscription
-	blocksSub ethereum.Subscription
+	pendingSub ethereum.Subscription
+	blocksSub  ethereum.Subscription
+
+	// Atomic transaction history.
+	TxHistoryMutex    *sync.RWMutex
+	PairToTxHistory   map[common.Address][]*types.Transaction
+	TxToOptionHistory map[common.Hash]*circle.TradeOption
 
 	// Atomic variables.
 	lastBlockNum atomic.Value
 	sortedTrades atomic.Value
 
 	// Other variables.
-	params  *PairUpdaterParams
-	backend *ethclient.Client
+	params     *PairUpdaterParams
+	backend    *ethclient.Client
+	rpcBackend *rpc.Client
 }
 
 // PairUpdaterParams
@@ -96,11 +105,28 @@ type DFSCircleParams struct {
 	RouteReserves [][]*big.Int
 }
 
+// DebugTraceCall
+// A response struct.
+type DebugTraceCall struct {
+	Failed      bool   `json:"failed"`
+	Gas         int    `json:"gas"`
+	ReturnValue string `json:"returnValue"`
+	StructLogs  []struct {
+		Depth   int      `json:"depth"`
+		Gas     int      `json:"gas"`
+		GasCost int      `json:"gasCost"`
+		Op      string   `json:"op"`
+		Pc      int      `json:"PC"`
+		Stack   []string `json:"stack"`
+	} `json:"structLogs"`
+}
+
 // NewPairUpdater
 //	Generates a new pair updater.
-func NewPairUpdater(params *PairUpdaterParams, backend *ethclient.Client) *PairUpdater {
+func NewPairUpdater(params *PairUpdaterParams, backend *ethclient.Client, rpcBackend *rpc.Client) *PairUpdater {
 	return &PairUpdater{
-		params:  params,
-		backend: backend,
+		params:     params,
+		backend:    backend,
+		rpcBackend: rpcBackend,
 	}
 }
