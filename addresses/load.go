@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/tarik0/DexEqualizer/logger"
+	"golang.org/x/exp/slices"
 	"math/big"
 	"os"
 	"strings"
@@ -58,13 +60,20 @@ func loadAddresses(path string, isRouter bool) (
 		}
 
 		address := common.HexToAddress(tmp[0])
-		addresses = append(addresses, address)
+
+		// Check if already added.
+		if slices.Contains(addresses, address) {
+			logger.Log.WithField("addr", address.String()).Infoln("Duplicate address detected! Skipping...")
+			continue
+		}
+
 		if !isRouter {
 			symbols[address] = tmp[1]
 		} else {
 			fees[address], _ = new(big.Int).SetString(tmp[1], 10)
 			symbols[address] = tmp[2]
 		}
+		addresses = append(addresses, address)
 	}
 
 	if err := newScanner.Err(); err != nil {

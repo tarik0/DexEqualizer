@@ -3,7 +3,6 @@ package updater
 import (
 	"context"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
 	"github.com/tarik0/DexEqualizer/logger"
@@ -11,7 +10,6 @@ import (
 	"github.com/tarik0/DexEqualizer/variables"
 	"golang.org/x/exp/maps"
 	"math/big"
-	"sync"
 )
 
 // Start
@@ -56,6 +54,9 @@ func (p *PairUpdater) Start() error {
 		return err
 	}
 
+	// History listener.
+	p.listenHistory()
+
 	// Sort circles.
 	p.sortCircles()
 
@@ -71,11 +72,6 @@ func (p *PairUpdater) Start() error {
 		logger.Log.WithError(err).Fatalln("Unable to get block number.")
 	}
 	p.lastBlockNum.Store(blockNum)
-
-	// The history of this block.
-	p.TxHistoryMutex = new(sync.RWMutex)
-	p.PairToTxHistory = make(map[common.Address][]*types.Transaction)
-	p.TxToOptionHistory = make(map[common.Hash]*circle.TradeOption)
 
 	// Start listening for new heads.
 	go func() {
@@ -109,7 +105,7 @@ func (p *PairUpdater) Start() error {
 				logger.Log.WithError(err).Errorln("Connected back to the new pending transactions!")
 			case hash := <-p.pendingCh:
 				if hash != nil {
-					p.listenPending(hash)
+					go p.listenPending(hash)
 				}
 			}
 		}

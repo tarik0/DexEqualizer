@@ -91,26 +91,6 @@ func main() {
 
 	//////////////////////////////////////////////
 
-	/*
-		endpoint, header, err := wsClientHeaders(endpoint, origin)
-		if err != nil {
-			return nil, err
-		}
-		return newClient(ctx, func(ctx context.Context) (ServerCodec, error) {
-			conn, resp, err := dialer.DialContext(ctx, endpoint, header)
-			if err != nil {
-				hErr := wsHandshakeError{err: err}
-				if resp != nil {
-					hErr.status = resp.Status
-				}
-				return nil, hErr
-			}
-			return newWebsocketCodec(conn, endpoint, header), nil
-		})
-	*/
-
-	//////////////////////////////////////////////
-
 	// Load routers.
 	variables.TargetRouters, variables.RouterNames, variables.RouterFees, err = addresses.LoadRouters(variables.ChainId)
 	if err != nil {
@@ -276,7 +256,7 @@ func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdat
 	// Estimate circles.
 	if variables.IsDev {
 		go func() {
-			circleGases, avgGas, errs := estimateCircles(options)
+			circleGases, _, errs := estimateCircles(options)
 			for i, _ := range circleGases {
 				if errs[i] != nil &&
 					fmt.Sprint(errs[i]) != "execution reverted: SE2" &&
@@ -286,7 +266,6 @@ func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdat
 					logger.Log.WithError(errs[i]).Fatalln("Circle failed the simulation.")
 				}
 			}
-			logger.Log.Debugln("Avg Gas Per Hop:", avgGas)
 		}()
 	}
 
@@ -294,7 +273,7 @@ func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdat
 	for _, swapCircle := range options {
 		// Check if profitable.
 		profit, _ := swapCircle.LoanProfit()
-		triggerLim := swapCircle.LoanTriggerProfit()
+		triggerLim := swapCircle.LoanTriggerProfit(variables.GasPrice)
 		if profit.Cmp(triggerLim) < 0 {
 			return
 		}
@@ -405,7 +384,7 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 }
 
 // triggerSwap triggers a new swap with circle.
-func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int, u *updater.PairUpdater) {
+func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int, u *updater.PairUpdater) {
 	// Broadcast buy.
 	go func() {
 		// Encoder.
@@ -418,7 +397,7 @@ func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int, 
 			Timestamp: time.Now().UnixMilli(),
 			Message: fmt.Sprintf(
 				"%s circle has passed the trigger limit of %.5f WBNB! (%.5f WBNB)",
-				swapCircle.Circle.SymbolsStr(),
+				tradeOption.Circle.SymbolsStr(),
 				utils.WeiToEthers(lim),
 				utils.WeiToEthers(profit),
 			),
@@ -449,18 +428,18 @@ func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int, 
 	// Set transactor values.
 	transactor.GasPrice = variables.GasPrice
 	transactor.Value = common.Big0
-	transactor.GasLimit = swapCircle.LoanGas()
+	transactor.GasLimit = tradeOption.LoanGasSpent() + tradeOption.LoanGasTokenAmount()*10000
 
 	// The parameter.
 	param := abis.FlashloanParameters{
-		Pairs:                 swapCircle.Circle.PairAddresses,
-		Reserves:              swapCircle.Circle.PairReserves,
-		Path:                  swapCircle.Circle.Path,
-		AmountsOut:            swapCircle.AmountsOut,
-		PairTokens:            swapCircle.Circle.PairTokens,
+		Pairs:                 tradeOption.Circle.PairAddresses,
+		Reserves:              tradeOption.Circle.PairReserves,
+		Path:                  tradeOption.Circle.Path,
+		AmountsOut:            tradeOption.AmountsOut,
+		PairTokens:            tradeOption.Circle.PairTokens,
 		GasToken:              config.Parsed.Contracts.GasToken,
-		GasTokenAmount:        new(big.Int).SetUint64(swapCircle.LoanGasTokenAmount()),
-		PoolDebt:              new(big.Int).Add(swapCircle.AmountsOut[0], swapCircle.LoanDebt()),
+		GasTokenAmount:        new(big.Int).SetUint64(tradeOption.LoanGasTokenAmount()),
+		PoolDebt:              new(big.Int).Add(tradeOption.AmountsOut[0], tradeOption.LoanDebt()),
 		RevertOnReserveChange: true,
 	}
 
@@ -468,36 +447,28 @@ func triggerSwap(swapCircle *circle.TradeOption, lim *big.Int, profit *big.Int, 
 	tx, err := variables.LoanExec.ExecuteFlashloan(transactor, param)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
-			"circle": swapCircle.GetJSON(),
+			"circle": tradeOption.GetJSON(),
 		}).WithError(err).Errorln("Unable to estimate gas for the transaction.")
 		return
 	}
 
-	// Lock the history mutex.
-	u.TxHistoryMutex.Lock()
-
-	// Iterate over pair addresses.
-	for _, addr := range swapCircle.Circle.PairAddresses {
-		// Generate new map if not found.
-		if _, ok := u.PairToTxHistory[addr]; !ok {
-			u.PairToTxHistory[addr] = make([]*types.Transaction, 0)
-		}
-
-		// Append to the history.
-		u.PairToTxHistory[addr] = append(u.PairToTxHistory[addr], tx)
-		u.TxToOptionHistory[tx.Hash()] = swapCircle
-	}
-
-	// Unlock the history mutex.
-	u.TxHistoryMutex.Unlock()
+	// Add to the history.
+	u.TxHistoryAdd <- struct {
+		Tx     *types.Transaction
+		Option *circle.TradeOption
+	}{Tx: tx, Option: tradeOption}
 
 	// Log transaction.
+	logger.Log.Infoln("")
 	logger.Log.WithFields(logrus.Fields{
-		"hash":          tx.Hash().String(),
-		"circle":        swapCircle.GetJSON(),
-		"gasCalculated": fmt.Sprintf("%.18f BNB", utils.WeiToEthers(swapCircle.LoanTriggerProfit())),
-		"gasUsed":       swapCircle.LoanTriggerGas(),
+		"hash":            tx.Hash().String(),
+		"circle":          tradeOption.GetJSON(),
+		"profitLimit":     fmt.Sprintf("%.18f BNB", utils.WeiToEthers(tradeOption.LoanTriggerProfit(transactor.GasPrice))),
+		"gasSpent":        tradeOption.LoanGasSpent(),
+		"chiAmount":       tradeOption.LoanGasTokenAmount(),
+		"gasSpentWithChi": tradeOption.LoanGasSpent() - tradeOption.LoanChiRefund(transactor.GasPrice),
 	}).Infoln("Arbitrage transaction sent!")
+	logger.Log.Infoln("")
 }
 
 // checkBalance checks the wallet balance and stops when too low.

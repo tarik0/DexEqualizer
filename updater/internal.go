@@ -9,14 +9,16 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/psilva261/timsort/v2"
 	"github.com/sirupsen/logrus"
 	"github.com/tarik0/DexEqualizer/abis"
 	"github.com/tarik0/DexEqualizer/circle"
-	"github.com/tarik0/DexEqualizer/config"
+	config "github.com/tarik0/DexEqualizer/config"
 	"github.com/tarik0/DexEqualizer/dexpair"
 	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/utils"
 	"github.com/tarik0/DexEqualizer/variables"
+	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 	"math/big"
 	"strings"
@@ -501,12 +503,27 @@ func (p *PairUpdater) findCircles() error {
 	var resCount int32 = 0
 	var resMutex = sync.RWMutex{}
 
-	p.Circles = make(map[uint64]*circle.Circle, 0)
+	tmpCircles := make(map[uint64]*circle.Circle, 0)
 
 	// Start DFS.
 	wg.Add(1)
-	dfsUtilOnlyCircle(dfsParams, &p.Circles, &resMutex, &resCount, &wg, p)
+	dfsUtilOnlyCircle(dfsParams, &tmpCircles, &resMutex, &resCount, &wg, p)
 	wg.Wait()
+
+	// Limit circle amount.
+	circleLen := len(tmpCircles)
+	if circleLen > int(config.Parsed.ArbitrageOptions.Limiters.MaxCircles) {
+		circleLen = int(config.Parsed.ArbitrageOptions.Limiters.MaxCircles)
+	}
+	p.Circles = make(map[uint64]*circle.Circle, circleLen)
+
+	// Shuffle circles.
+	tmpKeys := maps.Keys(tmpCircles)
+	for i := 0; i < circleLen; i++ {
+		key := tmpKeys[i]
+
+		p.Circles[key] = tmpCircles[key]
+	}
 
 	return nil
 }
@@ -564,6 +581,11 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 
 	// Update events.
 	for _, log := range prevLogs {
+		// Continue if not in addresses.
+		if _, ok := p.AddressToPair[log.Address]; !ok {
+			continue
+		}
+
 		// Iterate over topics.
 		for _, topic := range log.Topics {
 			// Continue if topic is not sync.
@@ -585,27 +607,17 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 		}
 	}
 
+	// Clear the transaction history.
+	p.TxHistoryReset <- true
+
 	// Sort the circles.
 	p.sortCircles()
 
 	// Update block number.
 	p.lastBlockNum.Swap(header.Number.Uint64())
 
-	// Clear the transaction history.
-	p.TxHistoryMutex.Lock()
-	p.PairToTxHistory = make(map[common.Address][]*types.Transaction)
-	p.TxToOptionHistory = make(map[common.Hash]*circle.TradeOption)
-	p.TxHistoryMutex.Unlock()
-
 	// Set update time.
 	updateTime := time.Since(start)
-
-	// Print block latency.
-	if variables.IsDev {
-		go func() {
-			logger.Log.Debugln("Block Latency:", updateTime, header.Number.Uint64())
-		}()
-	}
 
 	// Check if it took too much time.
 	if updateTime > 750*time.Millisecond {
@@ -623,11 +635,17 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 
 // listenPending gets triggered on a new pending transaction.
 func (p *PairUpdater) listenPending(hash *common.Hash) {
-	// Get transaction details.
-	transaction, isPending, err := variables.EthClient.TransactionByHash(context.Background(), *hash)
-	if err != nil || !isPending {
+	// Skip if no hash.
+	if hash == nil {
 		return
 	}
+
+	// Get transaction details.
+	transaction, isPending, err := variables.EthClient.TransactionByHash(context.Background(), *hash)
+	if err != nil && !isPending {
+		return
+	}
+	_ = isPending
 
 	// Filter out transactions.
 	if transaction == nil || transaction.To() == nil || transaction.Data() == nil {
@@ -640,18 +658,8 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 		transaction.To().String() == "0x000000000000000000000000000000000000dEaD" {
 		return
 	}
-	if transaction.GasPrice().Cmp(variables.GasPrice) < 0 {
+	if transaction.GasPrice().Cmp(variables.GasPrice) < 0 || transaction.Gas() < 50000 {
 		return
-	}
-
-	// Skip if no history.
-	if !variables.IsDev {
-		p.TxHistoryMutex.RLock()
-		if len(p.TxToOptionHistory) == 0 {
-			p.TxHistoryMutex.RUnlock()
-			return
-		}
-		p.TxHistoryMutex.RUnlock()
 	}
 
 	// Get from.
@@ -680,7 +688,7 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 	options["disableStorage"] = true
 	options["disableStack"] = false
 	options["enableMemory"] = false
-	options["timeout"] = "150ms"
+	options["timeout"] = "250ms"
 
 	// Trace as call.
 	var traceCallRes DebugTraceCall
@@ -689,130 +697,170 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 		logger.Log.
 			WithError(err).
 			WithField("hash", transaction.Hash().String()).
-			Errorln("Unable to simulate transaction.")
+			Debugln("Unable to simulate transaction.")
 		return
 	}
 
-	// Iterate over trace call
-	isSyncFound := false
-	isPairFound := false
-	var pairAddress common.Address
-	for i, structLog := range traceCallRes.StructLogs {
-		// Break if already found.
-		if isSyncFound && isPairFound {
-			break
-		}
+	// Return if not successfully.
+	if traceCallRes.Failed {
+		return
+	}
 
-		// Check stack size.
-		if i+2 > len(traceCallRes.StructLogs) || len(traceCallRes.StructLogs[i+1].Stack) < 3 {
+	// Limit the logs. (max 1k)
+	structLimit := len(traceCallRes.StructLogs)
+	if structLimit > 999 {
+		structLimit = 999
+	}
+
+	// Iterate over trace call
+	var pairAddress = make([]common.Address, 0)
+	for i, structLog := range traceCallRes.StructLogs[:structLimit] {
+		// Check the previous log.
+		if i == 0 || !strings.HasPrefix(traceCallRes.StructLogs[i-1].Op, "PUSH") {
 			continue
 		}
 
-		// Catch events.
-		if structLog.Op == "PUSH32" {
-			// Get the pushed event id.
-			eventId := traceCallRes.StructLogs[i+1].Stack[len(traceCallRes.StructLogs[i+1].Stack)-1]
-
-			// Check if it's a "Sync" event.
-			if strings.EqualFold(eventId, syncId.String()) {
-				isSyncFound = true
+		// Check the stack.
+		for _, stackVal := range structLog.Stack {
+			// Check if it's an address.
+			if !common.IsHexAddress(stackVal) {
 				continue
 			}
 
-			// Check if it's a "Transfer" event.
-			if strings.EqualFold(eventId, transferId.String()) {
-				// Get the addresses.
-				fromAddrRaw := traceCallRes.StructLogs[i+1].Stack[len(traceCallRes.StructLogs[i+1].Stack)-2]
-				toAddrRaw := traceCallRes.StructLogs[i+1].Stack[len(traceCallRes.StructLogs[i+1].Stack)-3]
-
-				// Skip if addresses are invalid.
-				if !common.IsHexAddress(fromAddrRaw) || !common.IsHexAddress(toAddrRaw) {
-					continue
-				}
-
-				// Check if any of the addresses are pair addresses.
-				fromAddr, toAddr := common.HexToAddress(fromAddrRaw), common.HexToAddress(toAddrRaw)
-				if slices.Contains(p.PairAddresses, fromAddr) {
-					isPairFound = true
-					pairAddress = fromAddr
-				} else if slices.Contains(p.PairAddresses, toAddr) {
-					isPairFound = true
-					pairAddress = toAddr
-				}
+			// Check if address is a pair.
+			tmpAddr := common.HexToAddress(stackVal)
+			if slices.Contains(p.PairAddresses, tmpAddr) {
+				pairAddress = append(pairAddress, tmpAddr)
+				break
 			}
 		}
 	}
 
 	// Check if it's a swap that includes our pairs.
-	if !isPairFound || !isSyncFound {
+	if len(pairAddress) == 0 {
 		return
 	}
 
-	// Lock the mutex.
-	p.TxHistoryMutex.Lock()
-
-	// Re-send the transaction.
-	if tradeTxes, ok := p.PairToTxHistory[pairAddress]; ok {
-		for i, tradeTx := range tradeTxes {
-			// Continue if gas price is more.
-			if tradeTx.GasPrice().Cmp(transaction.GasPrice()) > 0 {
-				continue
-			}
-
-			// Get the options.
-			tradeOption := p.TxToOptionHistory[tradeTx.Hash()]
-
-			// Calculate the frontrun gas cost. (%15 more gas.)
-			frontrunGasPrice := new(big.Int).Mul(transaction.GasPrice(), big.NewInt(115))
-			frontrunGasPrice.Div(frontrunGasPrice, big.NewInt(100))
-
-			// The frontrun gas cost. (gas price * gas)
-			frontrunGasCost := new(big.Int).Mul(new(big.Int).SetUint64(transaction.Gas()), frontrunGasPrice)
-
-			// Calculate the profit of the option.
-			tradeProfit, err := tradeOption.LoanProfit()
-			if err != nil {
-				utils.PrintTradeOption(tradeOption)
-				logger.Log.WithError(err).Errorln("Unable to calculate trade option's profit.")
-				continue
-			}
-
-			// Log fields.
-			logFields := logrus.Fields{
-				"targetTx":        transaction.Hash(),
-				"ourTx":           tradeTx.Hash(),
-				"pairAddr":        pairAddress,
-				"updatedGasPrice": fmt.Sprintf("%.3f Gwei", utils.WeiToUnit(frontrunGasPrice, big.NewInt(9))),
-			}
-
-			// Check if we are still in profit.
-			var replacedTx *types.Transaction
-			if tradeProfit.Cmp(frontrunGasCost) > 0 {
-				logger.Log.WithFields(logFields).Infoln("Updating trade transaction to frontrun competitors...")
-
-				// Increase the gas price and resend transaction again.
-				replacedTx = p.increaseTxGasPrice(tradeTx, frontrunGasPrice)
-
-				// Replace.
-				p.PairToTxHistory[pairAddress][i] = replacedTx
-			} else {
-				logger.Log.WithFields(logFields).Infoln("Trade transaction is not profitable anymore! Cancelling transaction...")
-
-				// Calculate the cancel gas cost. (%15 more gas.)
-				cancelGasPrice := new(big.Int).Mul(tradeTx.GasPrice(), big.NewInt(115))
-				cancelGasPrice.Div(cancelGasPrice, big.NewInt(100))
-
-				// Frontrun your own transaction and replace it with blank tx.
-				p.cancelTx(tradeTx, cancelGasPrice)
-
-				// Delete from history.
-				p.PairToTxHistory[pairAddress] = append(p.PairToTxHistory[pairAddress][:i], p.PairToTxHistory[pairAddress][i+1:]...)
-			}
+	// Send to the search channel.
+	for _, pairAddr := range pairAddress {
+		p.TxHistorySearch <- struct {
+			TargetTx       *types.Transaction
+			TargetPairAddr common.Address
+		}{
+			TargetTx:       transaction,
+			TargetPairAddr: pairAddr,
 		}
 	}
+}
 
-	// Unlock the mutex.
-	p.TxHistoryMutex.Unlock()
+// listenHistory gets triggered when a transaction gets added to history channel.
+func (p *PairUpdater) listenHistory() {
+	// Generate new channels.
+	p.TxHistoryReset = make(chan bool)
+	p.TxHistoryAdd = make(chan struct {
+		Tx     *types.Transaction
+		Option *circle.TradeOption
+	})
+	p.TxHistorySearch = make(chan struct {
+		TargetTx       *types.Transaction
+		TargetPairAddr common.Address
+	})
+
+	// Generate new history.
+	p.hashToOptionHistory = make(map[common.Hash]*circle.TradeOption)
+	p.hashToTxHistory = make(map[common.Hash]*types.Transaction)
+
+	go func() {
+		for {
+			select {
+			// Reset channel is prioritized.
+			case _ = <-p.TxHistoryReset:
+				// Reset the history.
+				if len(p.hashToTxHistory) == 0 {
+					continue
+				}
+
+				logger.Log.WithField("historyLen", len(p.hashToTxHistory)).Debugln("History cleared!")
+				p.hashToOptionHistory = make(map[common.Hash]*circle.TradeOption)
+				p.hashToTxHistory = make(map[common.Hash]*types.Transaction)
+			default:
+			case txInfo := <-p.TxHistoryAdd:
+				// Iterate over pair addresses.
+				p.hashToOptionHistory[txInfo.Tx.Hash()] = txInfo.Option
+				p.hashToTxHistory[txInfo.Tx.Hash()] = txInfo.Tx
+				logger.Log.WithField("historyLen", len(p.hashToTxHistory)).Debugln("Added to the history!")
+			case searchInfo := <-p.TxHistorySearch:
+				// Skip if history is empty.
+				if len(p.hashToOptionHistory) == 0 {
+					continue
+				}
+
+				// Search history.
+				for prevTxHash, prevOption := range p.hashToOptionHistory {
+					// Continue if none of the pairs are used in that transaction.
+					if !slices.Contains(prevOption.Circle.PairAddresses, searchInfo.TargetPairAddr) {
+						continue
+					}
+
+					// Get the previous transaction.
+					prevTx := p.hashToTxHistory[prevTxHash]
+
+					// Continue if gas price is lower.
+					if prevTx.GasPrice().Cmp(searchInfo.TargetTx.GasPrice()) > 0 {
+						continue
+					}
+
+					// Calculate the frontrun gas cost. (%15 more gas.)
+					frontrunGasPrice := new(big.Int).Mul(searchInfo.TargetTx.GasPrice(), big.NewInt(115))
+					frontrunGasPrice.Div(frontrunGasPrice, big.NewInt(100))
+
+					// Calculate the profit limit of the option.
+					newTradeProfitLimit := prevOption.LoanTriggerProfit(frontrunGasPrice)
+					tradeProfit, err := prevOption.LoanProfit()
+					if err != nil {
+						logger.Log.WithError(err).Errorln("Unable to calculate loan profit.")
+						utils.PrintTradeOption(prevOption)
+						continue
+					}
+
+					// Log fields.
+					logFields := logrus.Fields{
+						"targetTx":        searchInfo.TargetTx.Hash(),
+						"ourTx":           prevTx.Hash(),
+						"pairAddr":        searchInfo.TargetPairAddr,
+						"updatedGasPrice": fmt.Sprintf("%.3f Gwei", utils.WeiToUnit(frontrunGasPrice, big.NewInt(9))),
+					}
+
+					// Check if we are still in profit.
+					if tradeProfit.Cmp(newTradeProfitLimit) >= 0 {
+						logger.Log.WithFields(logFields).Infoln("Updating trade transaction to frontrun competitors...")
+
+						// Increase the gas price and resend transaction again.
+						replacedTx := p.increaseTxGasPrice(prevTx, frontrunGasPrice)
+
+						// Replace.
+						delete(p.hashToOptionHistory, prevTx.Hash())
+						delete(p.hashToTxHistory, prevTxHash)
+						p.hashToOptionHistory[replacedTx.Hash()] = prevOption
+						p.hashToTxHistory[replacedTx.Hash()] = replacedTx
+					} else {
+						logger.Log.WithFields(logFields).Infoln("Trade transaction is not profitable anymore! Cancelling transaction...")
+
+						// Calculate the cancel gas cost. (%15 more gas.)
+						cancelGasPrice := new(big.Int).Mul(prevTx.GasPrice(), big.NewInt(115))
+						cancelGasPrice.Div(cancelGasPrice, big.NewInt(100))
+
+						// Frontrun your own transaction and replace it with blank tx.
+						p.cancelTx(prevTx, cancelGasPrice)
+
+						// Delete from history.
+						delete(p.hashToOptionHistory, prevTx.Hash())
+						delete(p.hashToTxHistory, prevTxHash)
+					}
+				}
+			}
+		}
+	}()
 }
 
 // increaseTxGasPrice
@@ -879,7 +927,8 @@ func (p *PairUpdater) cancelTx(tx *types.Transaction, targetGasPrice *big.Int) *
 	// Send the transaction.
 	err = p.backend.SendTransaction(context.Background(), signedTx)
 	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to send blank transaction..")
+		logger.Log.WithError(err).Errorln("Unable to send blank transaction..")
+		return nil
 	}
 
 	logger.Log.WithFields(logrus.Fields{
@@ -895,7 +944,7 @@ func (p *PairUpdater) cancelTx(tx *types.Transaction, targetGasPrice *big.Int) *
 //	Quick sorts the circles.
 func (p *PairUpdater) quickSortCircles() []*circle.TradeOption {
 	// Get circles as array.
-	tradeArr := make([]*circle.TradeOption, 0, len(p.Circles))
+	tradeArr := make([]interface{}, 0)
 	for _, value := range p.Circles {
 		// Calculate optimal in.
 		optimalIn, amountsOut, err := p.GetOptimalIn(value)
@@ -905,17 +954,43 @@ func (p *PairUpdater) quickSortCircles() []*circle.TradeOption {
 			continue
 		}
 
-		option := &circle.TradeOption{
-			Circle:     value,
-			OptimalIn:  optimalIn,
-			AmountsOut: amountsOut,
+		// Generate new trade option.
+		option, err := circle.NewTradeOption(value, optimalIn, amountsOut)
+		if err != nil {
+			continue
 		}
 
 		// Append to the list.
 		tradeArr = append(tradeArr, option)
 	}
 
-	return p.quickSortUtil(tradeArr, 0, len(tradeArr)-1)
+	// Sort wim timsort.
+	timsort.Sort(tradeArr, func(a, b interface{}) bool {
+		// Get profits.
+		profitOne, err := a.(*circle.TradeOption).LoanProfit()
+		if err != nil {
+			utils.PrintTradeOption(a.(*circle.TradeOption))
+			logger.Log.WithError(err).Fatalln("Unable to calculate trade profit.")
+		}
+
+		profitTwo, err := b.(*circle.TradeOption).LoanProfit()
+		if err != nil {
+			utils.PrintTradeOption(b.(*circle.TradeOption))
+			logger.Log.WithError(err).Fatalln("Unable to calculate trade profit.")
+		}
+
+		return profitOne.Cmp(profitTwo) > 0
+	})
+
+	// Convert interface to trade.
+	tmp := make([]*circle.TradeOption, len(tradeArr))
+	for i, v := range tradeArr {
+		tmp[i] = v.(*circle.TradeOption)
+	}
+	return tmp
+
+	// The quicksort.
+	// return p.quickSortUtil(tradeArr, 0, len(tradeArr)-1)
 }
 
 // quickSortUtil
@@ -1055,23 +1130,18 @@ func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circl
 			}
 
 			// New circle.
-			arbCircle := &circle.Circle{
-				Path:          newPath,
-				Symbols:       newPathSymbols,
-				Pairs:         tmpPairs,
-				PairAddresses: newRoute,
-				PairFees:      newRouteFees,
-				PairTokens:    newRouteTokens,
-				PairReserves:  newRouteReserves,
+			arbCircle, err := circle.NewCircle(
+				newPath,
+				newPathSymbols,
+				tmpPairs,
+				newRouteFees,
+				newRouteTokens,
+				newRoute,
+				newRouteReserves,
+			)
+			if err != nil {
+				logger.Log.WithError(err).Fatalln("Unable to generate new circle.")
 			}
-
-			// Check limiter.
-			resMutex.RLock()
-			if *resCount > config.Parsed.ArbitrageOptions.Limiters.MaxCircles {
-				resMutex.RUnlock()
-				return
-			}
-			resMutex.RUnlock()
 
 			// Increase counter.
 			resMutex.Lock()

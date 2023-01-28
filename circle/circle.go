@@ -3,6 +3,7 @@ package circle
 import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/tarik0/DexEqualizer/dexpair"
+	"github.com/tarik0/DexEqualizer/variables"
 	"math/big"
 )
 
@@ -19,6 +20,9 @@ type Circle struct {
 	PairTokens    [][]common.Address
 	PairAddresses []common.Address
 	PairReserves  [][]*big.Int
+
+	// Is valid ?
+	isValid bool
 }
 
 // TradeOption
@@ -28,6 +32,9 @@ type TradeOption struct {
 
 	OptimalIn  *big.Int
 	AmountsOut []*big.Int
+
+	// Is valid ?
+	isValid bool
 }
 
 // TradeOptionJSON
@@ -38,4 +45,56 @@ type TradeOptionJSON struct {
 	Path         []string `json:"Path"`
 	Symbols      []string `json:"Symbols"`
 	AmountsOut   []string `json:"AmountsOut"`
+}
+
+// NewCircle generates a new arbitrage circle.
+func NewCircle(
+	// Path.
+	path []common.Address,
+	symbols []string,
+
+	// Pairs.
+	pairs []*dexpair.DexPair,
+	pairFees []*big.Int,
+	pairTokens [][]common.Address,
+	pairAddresses []common.Address,
+	pairReserves [][]*big.Int,
+) (*Circle, error) {
+	// Validate the inputs.
+	isValid := len(path) == len(symbols)
+	isValid = len(pairs) == len(path)+1
+	isValid = len(pairs) == len(pairFees)
+	isValid = len(pairs) == len(pairTokens)
+	isValid = len(pairs) == len(pairAddresses)
+	isValid = len(pairs) == len(pairReserves)
+	if !isValid {
+		return nil, variables.InvalidInput
+	}
+
+	return &Circle{
+		path,
+		symbols,
+		pairs,
+		pairFees,
+		pairTokens,
+		pairAddresses,
+		pairReserves,
+		true,
+	}, nil
+}
+
+// NewTradeOption generates a new trade option.
+func NewTradeOption(
+	c *Circle,
+	optimalIn *big.Int,
+	amountOut []*big.Int,
+) (*TradeOption, error) {
+	// Validate inputs.
+	isValid := c.isValid && optimalIn.Cmp(common.Big0) > 0
+	isValid = len(amountOut) == len(c.Path)
+	if !isValid {
+		return nil, variables.InvalidInput
+	}
+
+	return &TradeOption{c, optimalIn, amountOut, true}, nil
 }

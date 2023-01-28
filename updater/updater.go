@@ -9,7 +9,6 @@ import (
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/dexpair"
 	"math/big"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -48,17 +47,25 @@ type PairUpdater struct {
 	OnSort OnSortCallback
 
 	// Channels.
-	blocksCh  chan *types.Header
-	pendingCh chan *common.Hash
+	blocksCh       chan *types.Header
+	pendingCh      chan *common.Hash
+	TxHistoryReset chan bool
+	TxHistoryAdd   chan struct {
+		Tx     *types.Transaction
+		Option *circle.TradeOption
+	}
+	TxHistorySearch chan struct {
+		TargetTx       *types.Transaction
+		TargetPairAddr common.Address
+	}
 
 	// Subscriptions
 	pendingSub ethereum.Subscription
 	blocksSub  ethereum.Subscription
 
-	// Atomic transaction history.
-	TxHistoryMutex    *sync.RWMutex
-	PairToTxHistory   map[common.Address][]*types.Transaction
-	TxToOptionHistory map[common.Hash]*circle.TradeOption
+	// Transaction history.
+	hashToOptionHistory map[common.Hash]*circle.TradeOption
+	hashToTxHistory     map[common.Hash]*types.Transaction
 
 	// Atomic variables.
 	lastBlockNum atomic.Value
