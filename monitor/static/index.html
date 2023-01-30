@@ -202,7 +202,7 @@
             // Split by new lines.
             let messages = event.data.split("\n");
             messages.forEach((messageRaw) => {
-                if (messageRaw === undefined || messageRaw === null) return;
+                if (messageRaw === undefined || messageRaw === null || messageRaw.trim() === "") return;
 
                 // Parse data.
                 let message;

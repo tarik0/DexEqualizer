@@ -17,7 +17,7 @@ import (
 
 var MaxProcessAmount = 10000
 
-type OnSortCallback func(header *types.Header, updateTime time.Duration, u *PairUpdater)
+type OnSortCallback func(*types.Header, []*circle.TradeOption, time.Duration, *PairUpdater)
 
 // PairUpdater
 //	A system that checks pair reserves for arbitrage options.
@@ -51,8 +51,9 @@ type PairUpdater struct {
 	pendingCh      chan *common.Hash
 	TxHistoryReset chan bool
 	TxHistoryAdd   chan struct {
-		Tx     *types.Transaction
-		Option *circle.TradeOption
+		Tx          *types.Transaction
+		Option      *circle.TradeOption
+		BlockNumber *big.Int
 	}
 	TxHistorySearch chan struct {
 		TargetTx       *types.Transaction
@@ -66,10 +67,10 @@ type PairUpdater struct {
 	// Transaction history.
 	hashToOptionHistory map[common.Hash]*circle.TradeOption
 	hashToTxHistory     map[common.Hash]*types.Transaction
+	hashToTxBlock       map[common.Hash]*big.Int
 
 	// Atomic variables.
 	lastBlockNum atomic.Value
-	sortedTrades atomic.Value
 
 	// Other variables.
 	params     *PairUpdaterParams

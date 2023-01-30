@@ -35,7 +35,6 @@ var pairAbi, _ = abi.JSON(strings.NewReader(abis.PairMetaData.ABI))
 var erc20Abi, _ = abi.JSON(strings.NewReader(abis.ERC20MetaData.ABI))
 
 var syncId = pairAbi.Events["Sync"].ID
-var transferId = erc20Abi.Events["Transfer"].ID
 
 // findFactories
 // 	Finds the factory addresses from the routers.
@@ -69,8 +68,9 @@ func (p *PairUpdater) findFactories() error {
 		abiList[i] = routerAbi
 	}
 
-	// Multi call factories..
-	_, returnBytes, err := p.multiCall(abiList, contractAddresses, functionNames, functionArgs)
+	// Multi call factories.
+	callBlockNum := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
+	_, returnBytes, err := p.multiCall(abiList, contractAddresses, functionNames, functionArgs, callBlockNum)
 	if err != nil {
 		return err
 	}
@@ -178,11 +178,12 @@ func (p *PairUpdater) findPairAddresses() error {
 		wg.Add(1)
 
 		// Start routine.
+		callBlockNum := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
 		go func(addresses []common.Address, funcNames []string, funcArgs [][]interface{}) {
 			defer wg.Done()
 
 			// Multi call factories..
-			_, returnBytes, err := p.multiCall(abiList, addresses, funcNames, funcArgs)
+			_, returnBytes, err := p.multiCall(abiList, addresses, funcNames, funcArgs, callBlockNum)
 			if err != nil {
 				resChan <- &struct {
 					Factories     []common.Address
@@ -292,7 +293,7 @@ func (p *PairUpdater) findReserves() error {
 	// Address slice.
 	var contractAddresses = make([]common.Address, len(p.Pairs))
 	for i, _pair := range p.Pairs {
-		contractAddresses[i] = _pair.Address
+		contractAddresses[i] = _pair.Address()
 	}
 
 	// Function name slice.
@@ -334,6 +335,9 @@ func (p *PairUpdater) findReserves() error {
 		Err       error
 	})
 
+	// Get current block number.
+	callBlockNum := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
+
 	// Start workers.
 	for chunkId := 0; chunkId < len(contractAddressesChunks); chunkId++ {
 		// The chunks.
@@ -348,8 +352,8 @@ func (p *PairUpdater) findReserves() error {
 		go func() {
 			defer wg.Done()
 
-			// Multi call factories..
-			_, returnBytes, err := p.multiCall(abiList, contractAddressesChunk, functionNamesChunk, functionArgsChunk)
+			// Multi call factories.
+			_, returnBytes, err := p.multiCall(abiList, contractAddressesChunk, functionNamesChunk, functionArgsChunk, callBlockNum)
 			if err != nil {
 				resChan <- &struct {
 					Reserves  [][]*big.Int
@@ -412,7 +416,7 @@ func (p *PairUpdater) findReserves() error {
 			if len(r.Reserves[i]) != 2 || r.Addresses[i].String() == "0x0000000000000000000000000000000000000000" {
 				continue
 			}
-			p.AddressToPair[addr].SetReserves(r.Reserves[i][0], r.Reserves[i][1])
+			p.AddressToPair[addr].SetReserves(r.Reserves[i][0], r.Reserves[i][1], callBlockNum)
 		}
 	}
 
@@ -446,8 +450,9 @@ func (p *PairUpdater) findDecimals() error {
 		abiList[i] = erc20Abi
 	}
 
-	// Multi call factories..
-	_, returnBytes, err := p.multiCall(abiList, contractAddresses, functionNames, functionArgs)
+	// Multi call factories.
+	callBlockNum := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
+	_, returnBytes, err := p.multiCall(abiList, contractAddresses, functionNames, functionArgs, callBlockNum)
 	if err != nil {
 		return err
 	}
@@ -530,9 +535,9 @@ func (p *PairUpdater) findCircles() error {
 
 // sortCircles
 //	Sorts DFS circles.
-func (p *PairUpdater) sortCircles() {
+func (p *PairUpdater) sortCircles() []*circle.TradeOption {
 	sortedTrades := p.quickSortCircles()
-	p.sortedTrades.Swap(sortedTrades)
+	return sortedTrades
 }
 
 // subscribeToHeads
@@ -552,11 +557,21 @@ func (p *PairUpdater) subscribeToHeads() {
 // subscribeToPending
 //	Subscribes to the new pending transactions.
 func (p *PairUpdater) subscribeToPending() {
+	// Test if `debug_traceCall` is supported.
+	supportedModules, err := p.rpcBackend.SupportedModules()
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to check supported modules.")
+		return
+	}
+	if _, ok := supportedModules["debug"]; !ok {
+		logger.Log.Warningln("'debug_traceCall' is not supported. Transaction simulator disabled!")
+		return
+	}
+
 	// Make new channel.
 	p.pendingCh = make(chan *common.Hash)
 
 	// Subscribe to the new blocks.
-	var err error
 	p.pendingSub, err = variables.RpcClient.EthSubscribe(context.Background(), p.pendingCh, "newPendingTransactions")
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to subscribe to the pending transactions.")
@@ -572,7 +587,7 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 	// Get the previous 3 block's logs.
 	prevLogs, err := p.backend.FilterLogs(context.Background(), ethereum.FilterQuery{
 		Addresses: p.PairAddresses,
-		FromBlock: new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64)),
+		FromBlock: header.Number,
 		ToBlock:   header.Number,
 	})
 	if err != nil {
@@ -580,6 +595,7 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 	}
 
 	// Update events.
+	var wg sync.WaitGroup
 	for _, log := range prevLogs {
 		// Continue if not in addresses.
 		if _, ok := p.AddressToPair[log.Address]; !ok {
@@ -587,49 +603,90 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 		}
 
 		// Iterate over topics.
-		for _, topic := range log.Topics {
-			// Continue if topic is not sync.
-			if !bytes.Equal(syncId.Bytes(), topic.Bytes()) {
-				continue
-			}
+		// TODO find a more efficient way to update.
+		wg.Add(1)
+		log := log
+		go func() {
+			defer wg.Done()
 
-			// Decode event.
-			syncDetails, err := pairAbi.Unpack("Sync", log.Data)
-			if err != nil {
-				logger.Log.WithError(err).Errorln("Unable to decode 'sync' events.")
+			for _, topic := range log.Topics {
+				// Continue if topic is not sync.
+				if !bytes.EqualFold(syncId.Bytes(), topic.Bytes()) {
+					continue
+				}
+
+				// Decode event.
+				syncDetails, err := pairAbi.Unpack("Sync", log.Data)
+				if err != nil {
+					logger.Log.WithError(err).Errorln("Unable to decode 'sync' events.")
+					break
+				}
+
+				// Update reserves.
+				resA, resB := syncDetails[0].(*big.Int), syncDetails[1].(*big.Int)
+				p.AddressToPair[log.Address].SetReserves(resA, resB, header.Number)
 				break
 			}
-
-			// Update reserves.
-			resA, resB := syncDetails[0].(*big.Int), syncDetails[1].(*big.Int)
-			p.AddressToPair[log.Address].SetReserves(resA, resB)
-			break
-		}
+		}()
 	}
+
+	wg.Wait()
+
+	// Check if new blocks are already mined.
+	latestBlock, _ := p.GetLatestBlock()
+	if latestBlock > header.Number.Uint64() {
+		logger.Log.
+			WithField("blockNum", header.Number.Uint64()).
+			WithField("latestBlockNum", latestBlock).
+			WithField("updateTime", time.Since(start)).
+			Debugln("Block latency is too much! Skipping this block...")
+		return
+	}
+
+	// Sort start time.
+	sortStart := time.Now()
+
+	// Sort the circles.
+	sortedTradeOptions := p.sortCircles()
+
+	// Set update time.
+	sortTime := time.Since(sortStart)
+	updateTime := time.Since(start)
 
 	// Clear the transaction history.
 	p.TxHistoryReset <- true
 
-	// Sort the circles.
-	p.sortCircles()
-
-	// Update block number.
-	p.lastBlockNum.Swap(header.Number.Uint64())
-
-	// Set update time.
-	updateTime := time.Since(start)
+	// Check if new blocks are already mined.
+	latestBlock, _ = p.GetLatestBlock()
+	if latestBlock > header.Number.Uint64() {
+		logger.Log.
+			WithField("updateTime", updateTime).
+			WithField("sortTime", sortTime).
+			WithField("blockNum", header.Number.Uint64()).
+			WithField("latestBlockNum", latestBlock).
+			Debugln("Block latency is too much! Skipping this block...")
+		return
+	}
 
 	// Check if it took too much time.
 	if updateTime > 750*time.Millisecond {
 		logger.Log.
-			WithField("latency", time.Since(start)).
+			WithField("updateTime", updateTime).
+			WithField("sortTime", sortTime).
 			WithField("blockNum", header.Number.Uint64()).
-			Infoln("Block latency is too much! Skipping this block...")
-	} else {
-		// Trigger event.
-		if p.OnSort != nil {
-			p.OnSort(header, updateTime, p)
-		}
+			Debugln("Block latency is too much! Skipping this block...")
+		return
+	}
+
+	logger.Log.
+		WithField("updateTime", updateTime).
+		WithField("sortTime", sortTime).
+		WithField("blockNum", header.Number).
+		Debugln("New block mined!")
+
+	// Trigger event.
+	if p.OnSort != nil && len(sortedTradeOptions) > 0 {
+		p.OnSort(header, sortedTradeOptions, updateTime, p)
 	}
 }
 
@@ -669,10 +726,48 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 	}
 
 	// Skip our transactions.
-	if bytes.Equal(msg.From().Bytes(), variables.Wallet.Address().Bytes()) {
+	if bytes.EqualFold(msg.From().Bytes(), variables.Wallet.Address().Bytes()) {
 		return
 	}
 
+	// Static search.
+	if !p.staticSearch(transaction) {
+		// Dynamic search.
+		p.dynamicSearch(msg, transaction)
+	}
+}
+
+// staticSearch
+//	Searches the transaction data and check if any of our pairs are used.
+func (p *PairUpdater) staticSearch(transaction *types.Transaction) bool {
+	// Limit call data to 100 + 4 bytes
+	callData := transaction.Data()
+	if len(callData) > 104 {
+		callData = callData[4:100]
+	}
+
+	// Iterate over pairs.
+	isFound := false
+	for _, pairAddr := range p.PairAddresses {
+		// Trigger search if pair address is in the transaction data.
+		if bytes.Contains(callData, pairAddr.Bytes()) {
+			isFound = true
+			p.TxHistorySearch <- struct {
+				TargetTx       *types.Transaction
+				TargetPairAddr common.Address
+			}{
+				TargetTx:       transaction,
+				TargetPairAddr: pairAddr,
+			}
+		}
+	}
+
+	return isFound
+}
+
+// dynamicSearch
+// 	Simulates a transaction with `debug_traceCall` and checks if any of our pairs are used.
+func (p *PairUpdater) dynamicSearch(msg types.Message, transaction *types.Transaction) {
 	// Marshall tx.
 	simulationTx := make(map[string]string)
 	simulationTx["from"] = msg.From().String()
@@ -692,7 +787,7 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 
 	// Trace as call.
 	var traceCallRes DebugTraceCall
-	err = p.rpcBackend.Call(&traceCallRes, "debug_traceCall", simulationTx, "latest", options)
+	err := p.rpcBackend.Call(&traceCallRes, "debug_traceCall", simulationTx, "latest", options)
 	if err != nil {
 		logger.Log.
 			WithError(err).
@@ -758,8 +853,9 @@ func (p *PairUpdater) listenHistory() {
 	// Generate new channels.
 	p.TxHistoryReset = make(chan bool)
 	p.TxHistoryAdd = make(chan struct {
-		Tx     *types.Transaction
-		Option *circle.TradeOption
+		Tx          *types.Transaction
+		Option      *circle.TradeOption
+		BlockNumber *big.Int
 	})
 	p.TxHistorySearch = make(chan struct {
 		TargetTx       *types.Transaction
@@ -769,6 +865,7 @@ func (p *PairUpdater) listenHistory() {
 	// Generate new history.
 	p.hashToOptionHistory = make(map[common.Hash]*circle.TradeOption)
 	p.hashToTxHistory = make(map[common.Hash]*types.Transaction)
+	p.hashToTxBlock = make(map[common.Hash]*big.Int)
 
 	go func() {
 		for {
@@ -783,11 +880,13 @@ func (p *PairUpdater) listenHistory() {
 				logger.Log.WithField("historyLen", len(p.hashToTxHistory)).Debugln("History cleared!")
 				p.hashToOptionHistory = make(map[common.Hash]*circle.TradeOption)
 				p.hashToTxHistory = make(map[common.Hash]*types.Transaction)
+				p.hashToTxBlock = make(map[common.Hash]*big.Int)
 			default:
 			case txInfo := <-p.TxHistoryAdd:
 				// Iterate over pair addresses.
 				p.hashToOptionHistory[txInfo.Tx.Hash()] = txInfo.Option
 				p.hashToTxHistory[txInfo.Tx.Hash()] = txInfo.Tx
+				p.hashToTxBlock[txInfo.Tx.Hash()] = txInfo.BlockNumber
 				logger.Log.WithField("historyLen", len(p.hashToTxHistory)).Debugln("Added to the history!")
 			case searchInfo := <-p.TxHistorySearch:
 				// Skip if history is empty.
@@ -797,6 +896,13 @@ func (p *PairUpdater) listenHistory() {
 
 				// Search history.
 				for prevTxHash, prevOption := range p.hashToOptionHistory {
+					// Get previous transaction's block number.
+					prevTxBlock := p.hashToTxBlock[prevTxHash]
+					latestBlock := p.lastBlockNum.Load().(*big.Int)
+					if latestBlock.Cmp(prevTxBlock) != 0 {
+						break
+					}
+
 					// Continue if none of the pairs are used in that transaction.
 					if !slices.Contains(prevOption.Circle.PairAddresses, searchInfo.TargetPairAddr) {
 						continue
@@ -804,6 +910,7 @@ func (p *PairUpdater) listenHistory() {
 
 					// Get the previous transaction.
 					prevTx := p.hashToTxHistory[prevTxHash]
+					tradeOption := p.hashToOptionHistory[prevTxHash]
 
 					// Continue if gas price is lower.
 					if prevTx.GasPrice().Cmp(searchInfo.TargetTx.GasPrice()) > 0 {
@@ -815,10 +922,10 @@ func (p *PairUpdater) listenHistory() {
 					frontrunGasPrice.Div(frontrunGasPrice, big.NewInt(100))
 
 					// Calculate the profit limit of the option.
-					newTradeProfitLimit := prevOption.LoanTriggerProfit(frontrunGasPrice)
-					tradeProfit, err := prevOption.LoanProfit()
+					newTradeProfitLimit := prevOption.NormalTriggerProfit(frontrunGasPrice)
+					tradeProfit, err := prevOption.NormalProfit()
 					if err != nil {
-						logger.Log.WithError(err).Errorln("Unable to calculate loan profit.")
+						logger.Log.WithError(err).Errorln("Unable to calculate trade profit.")
 						utils.PrintTradeOption(prevOption)
 						continue
 					}
@@ -836,13 +943,17 @@ func (p *PairUpdater) listenHistory() {
 						logger.Log.WithFields(logFields).Infoln("Updating trade transaction to frontrun competitors...")
 
 						// Increase the gas price and resend transaction again.
-						replacedTx := p.increaseTxGasPrice(prevTx, frontrunGasPrice)
+						replacedTx := p.increaseTxGasPrice(prevTx, tradeOption, prevTxBlock, frontrunGasPrice)
 
 						// Replace.
-						delete(p.hashToOptionHistory, prevTx.Hash())
-						delete(p.hashToTxHistory, prevTxHash)
-						p.hashToOptionHistory[replacedTx.Hash()] = prevOption
-						p.hashToTxHistory[replacedTx.Hash()] = replacedTx
+						if replacedTx != nil {
+							delete(p.hashToOptionHistory, prevTxHash)
+							delete(p.hashToTxHistory, prevTxHash)
+							delete(p.hashToTxBlock, prevTxHash)
+							p.hashToOptionHistory[replacedTx.Hash()] = prevOption
+							p.hashToTxHistory[replacedTx.Hash()] = replacedTx
+							p.hashToTxBlock[replacedTx.Hash()] = prevTxBlock
+						}
 					} else {
 						logger.Log.WithFields(logFields).Infoln("Trade transaction is not profitable anymore! Cancelling transaction...")
 
@@ -851,11 +962,14 @@ func (p *PairUpdater) listenHistory() {
 						cancelGasPrice.Div(cancelGasPrice, big.NewInt(100))
 
 						// Frontrun your own transaction and replace it with blank tx.
-						p.cancelTx(prevTx, cancelGasPrice)
+						replacedTx := p.cancelTx(prevTx, tradeOption, prevTxBlock, cancelGasPrice)
 
 						// Delete from history.
-						delete(p.hashToOptionHistory, prevTx.Hash())
-						delete(p.hashToTxHistory, prevTxHash)
+						if replacedTx != nil {
+							delete(p.hashToOptionHistory, prevTx.Hash())
+							delete(p.hashToTxHistory, prevTxHash)
+							delete(p.hashToTxBlock, prevTxHash)
+						}
 					}
 				}
 			}
@@ -865,7 +979,7 @@ func (p *PairUpdater) listenHistory() {
 
 // increaseTxGasPrice
 //	Increases the transaction's gas price and re-sends it again.
-func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, targetGasPrice *big.Int) *types.Transaction {
+func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.TradeOption, prevBlock *big.Int, targetGasPrice *big.Int) *types.Transaction {
 	// Replace transaction.
 	replaceTransaction := types.NewTx(&types.LegacyTx{
 		Nonce:    tx.Nonce(),
@@ -885,6 +999,19 @@ func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, targetGasPrice *
 		logger.Log.WithError(err).Fatalln("Unable to sign replacement transaction.")
 	}
 
+	// Check if block has passed.
+	for _, _pair := range option.Circle.Pairs {
+		latestBlockNum, _ := p.GetLatestBlock()
+		if prevBlock.Uint64() != latestBlockNum {
+			logger.Log.WithFields(logrus.Fields{
+				"pairAddr":          _pair.Address().String(),
+				"latestBlock":       latestBlockNum,
+				"latestUpdateBlock": prevBlock.Uint64(),
+			}).Warningln("Block has already passed! Skipping updating...")
+			return nil
+		}
+	}
+
 	// Send the transaction.
 	err = p.backend.SendTransaction(context.Background(), signedTx)
 	if err != nil {
@@ -902,7 +1029,7 @@ func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, targetGasPrice *
 
 // cancelTx
 //	Increases the transaction's gas price and replaces it with blank transaction.
-func (p *PairUpdater) cancelTx(tx *types.Transaction, targetGasPrice *big.Int) *types.Transaction {
+func (p *PairUpdater) cancelTx(tx *types.Transaction, option *circle.TradeOption, prevBlock *big.Int, targetGasPrice *big.Int) *types.Transaction {
 	walletAddr := variables.Wallet.Address()
 
 	// Blank transaction.
@@ -922,6 +1049,19 @@ func (p *PairUpdater) cancelTx(tx *types.Transaction, targetGasPrice *big.Int) *
 	signedTx, err := signer.Signer(signer.From, blankTx)
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to sign blank transaction.")
+	}
+
+	// Check if block has passed.
+	for _, _pair := range option.Circle.Pairs {
+		latestBlockNum, _ := p.GetLatestBlock()
+		if prevBlock.Uint64() != latestBlockNum {
+			logger.Log.WithFields(logrus.Fields{
+				"pairAddr":          _pair.Address().String(),
+				"latestBlock":       latestBlockNum,
+				"latestUpdateBlock": prevBlock.Uint64(),
+			}).Warningln("Block has already passed! Too late for cancelling...")
+			return nil
+		}
 	}
 
 	// Send the transaction.
@@ -964,16 +1104,16 @@ func (p *PairUpdater) quickSortCircles() []*circle.TradeOption {
 		tradeArr = append(tradeArr, option)
 	}
 
-	// Sort wim timsort.
+	// Sort with timsort.
 	timsort.Sort(tradeArr, func(a, b interface{}) bool {
 		// Get profits.
-		profitOne, err := a.(*circle.TradeOption).LoanProfit()
+		profitOne, err := a.(*circle.TradeOption).NormalProfit()
 		if err != nil {
 			utils.PrintTradeOption(a.(*circle.TradeOption))
 			logger.Log.WithError(err).Fatalln("Unable to calculate trade profit.")
 		}
 
-		profitTwo, err := b.(*circle.TradeOption).LoanProfit()
+		profitTwo, err := b.(*circle.TradeOption).NormalProfit()
 		if err != nil {
 			utils.PrintTradeOption(b.(*circle.TradeOption))
 			logger.Log.WithError(err).Fatalln("Unable to calculate trade profit.")
@@ -1013,13 +1153,13 @@ func (p *PairUpdater) partition(arr []*circle.TradeOption, low, high int) ([]*ci
 
 	for j := low; j < high; j++ {
 		// Get profits.
-		profitOne, err := arr[j].LoanProfit()
+		profitOne, err := arr[j].NormalProfit()
 		if err != nil {
 			utils.PrintTradeOption(arr[j])
 			logger.Log.WithError(err).Fatalln("Unable to calculate trade profit.")
 		}
 
-		profitTwo, err := pivot.LoanProfit()
+		profitTwo, err := pivot.NormalProfit()
 		if err != nil {
 			utils.PrintTradeOption(pivot)
 			logger.Log.WithError(err).Fatalln("Unable to calculate trade profit.")
@@ -1056,12 +1196,12 @@ func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circl
 		}
 
 		// Skip if already visited.
-		if slices.Contains(params.Route, _pair.Address) {
+		if slices.Contains(params.Route, _pair.Address()) {
 			continue
 		}
 
 		// Get pair tokens.
-		pairTokens, ok := u.PairToTokens[_pair.Address]
+		pairTokens, ok := u.PairToTokens[_pair.Address()]
 		if !ok {
 			panic("pair not in database")
 		}
@@ -1070,9 +1210,9 @@ func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circl
 		var tempOutToken common.Address
 
 		// Find the output token.
-		if bytes.Equal(pairTokens[0].Bytes(), tempIn.Bytes()) {
+		if bytes.EqualFold(pairTokens[0].Bytes(), tempIn.Bytes()) {
 			tempOutToken = pairTokens[1]
-		} else if bytes.Equal(pairTokens[1].Bytes(), tempIn.Bytes()) {
+		} else if bytes.EqualFold(pairTokens[1].Bytes(), tempIn.Bytes()) {
 			tempOutToken = pairTokens[0]
 		} else {
 			panic("token addresses are not right for pair")
@@ -1091,14 +1231,14 @@ func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circl
 		}
 
 		// Get route fee.
-		routeFee, err := u.GetPairFee(_pair.Address)
+		routeFee, err := u.GetPairFee(_pair.Address())
 		if err != nil {
 			panic("pair fee not found")
 		}
 
 		// Check cycle.
 		if len(params.Route) >= config.Parsed.ArbitrageOptions.Limiters.MinHops &&
-			bytes.Equal(tempOutToken.Bytes(), params.Path[0].Bytes()) {
+			bytes.EqualFold(tempOutToken.Bytes(), params.Path[0].Bytes()) {
 			// New variables.
 			newPath := make([]common.Address, len(params.Path))
 			newPathSymbols := make([]string, len(params.Symbols))
@@ -1119,9 +1259,9 @@ func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circl
 			newPath = append(newPath, tempOutToken)
 			newPathSymbols = append(newPathSymbols, tempOutSymbol)
 			newRouteFees = append(newRouteFees, routeFee)
-			newRoute = append(newRoute, _pair.Address)
+			newRoute = append(newRoute, _pair.Address())
 			newRouteTokens = append(newRouteTokens, pairTokens)
-			newRouteReserves = append(newRouteReserves, []*big.Int{_pair.ReserveA, _pair.ReserveB})
+			newRouteReserves = append(newRouteReserves, _pair.GetReserves())
 
 			// Get route as structs.
 			tmpPairs := make([]*dexpair.DexPair, len(newRoute))
@@ -1168,10 +1308,10 @@ func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circl
 
 			newParams.Path = append(newParams.Path, tempOutToken)
 			newParams.Symbols = append(newParams.Symbols, tempOutSymbol)
-			newParams.Route = append(params.Route, _pair.Address)
+			newParams.Route = append(params.Route, _pair.Address())
 			newParams.RouteFees = append(params.RouteFees, routeFee)
 			newParams.RouteTokens = append(params.RouteTokens, pairTokens)
-			newParams.RouteReserves = append(newParams.RouteReserves, []*big.Int{_pair.ReserveA, _pair.ReserveB})
+			newParams.RouteReserves = append(newParams.RouteReserves, _pair.GetReserves())
 
 			// Recursive
 			wg.Add(1)
@@ -1187,6 +1327,7 @@ func (p *PairUpdater) multiCall(
 	contractAddresses []common.Address,
 	functionNames []string,
 	functionArgs [][]interface{},
+	blockNumber *big.Int,
 ) (*big.Int, [][]byte, error) {
 	// Iterate through the addresses.
 	var calls []abis.MulticallCall
@@ -1220,7 +1361,7 @@ func (p *PairUpdater) multiCall(
 
 	// Call the aggregate function.
 	gasLimit, err := p.backend.EstimateGas(context.Background(), msg)
-	result, err := p.backend.PendingCallContract(context.Background(), msg)
+	result, err := p.backend.CallContract(context.Background(), msg, blockNumber)
 	if err != nil {
 		return nil, nil, err
 	}

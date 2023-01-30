@@ -3,7 +3,6 @@ package ws
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/logger"
 	"net/http"
 	"time"
@@ -46,21 +45,6 @@ func (h *Hub) SetHandler() {
 // sendHello
 //	Sends `History` and `Rank` packets to the new client.
 func (h *Hub) sendHello(newClient *Client) {
-	// Get trade options.
-	options := h.updater.GetSortedTrades()
-	if options == nil || len(options) == 0 {
-		return
-	}
-
-	// Print the best 10 options.
-	var tradesJson = make([]circle.TradeOptionJSON, 5)
-	for i, opt := range options {
-		tradesJson[i] = opt.GetJSON()
-		if i == 4 {
-			break
-		}
-	}
-
 	// Encoder.
 	var buff = new(bytes.Buffer)
 	e := json.NewEncoder(buff)
@@ -92,7 +76,7 @@ func (h *Hub) sendHello(newClient *Client) {
 	err = e.Encode(WebsocketReq{
 		Type: "Rank",
 		Data: RankReq{
-			Circles:     tradesJson,
+			Circles:     nil,
 			SortTime:    0,
 			BlockNumber: blockNum,
 		},

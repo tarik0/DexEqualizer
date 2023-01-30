@@ -21,7 +21,7 @@ func (c *Circle) SymbolsStr() string {
 
 // NormalProfit returns the profit.
 func (t *TradeOption) NormalProfit() (*big.Int, error) {
-	if !bytes.Equal(t.Circle.Path[0].Bytes(), t.Circle.Path[len(t.Circle.Path)-1].Bytes()) {
+	if !bytes.EqualFold(t.Circle.Path[0].Bytes(), t.Circle.Path[len(t.Circle.Path)-1].Bytes()) {
 		return nil, variables.InvalidInput
 	}
 
@@ -35,58 +35,25 @@ func (t *TradeOption) NormalProfit() (*big.Int, error) {
 	return profit, nil
 }
 
-// LoanProfit returns the flashloan profit.
-func (t *TradeOption) LoanProfit() (*big.Int, error) {
-	// Get normal profit.
-	normalProfit, err := t.NormalProfit()
-	if err != nil {
-		return nil, err
-	}
-
-	// Subtract the loan debt.
-	normalProfit.Sub(normalProfit, t.LoanDebt())
-	return normalProfit, nil
-}
-
-// LoanDebt returns the flashloan debt.
-func (t *TradeOption) LoanDebt() *big.Int {
-	// Calculate loan debt.
-	loanDebt := new(big.Int).Mul(
-		new(big.Int).Sub(variables.Big10000, t.Circle.PairFees[0]),
-		t.AmountsOut[0],
-	)
-	loanDebt.Div(loanDebt, variables.Big10000)
-
-	return loanDebt
-}
-
-// LoanTriggerProfit returns the minimum amount of profit we need to trigger a flashloan swap.
-func (t *TradeOption) LoanTriggerProfit(gasPrice *big.Int) *big.Int {
-	gasCost := new(big.Int).SetUint64(t.LoanGasSpent() - t.LoanChiRefund(gasPrice))
+// NormalTriggerProfit returns the minimum amount of profit we need to trigger a swap.
+func (t *TradeOption) NormalTriggerProfit(gasPrice *big.Int) *big.Int {
+	gasCost := new(big.Int).SetUint64((t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) - t.NormalChiRefund())
 	gasCost.Mul(gasCost, gasPrice)
 
 	// Add chi cost.
-	chiCost := new(big.Int).Mul(new(big.Int).SetUint64(t.LoanGasTokenAmount()), variables.ChiCost)
+	chiCost := new(big.Int).Mul(new(big.Int).SetUint64(t.NormalGasTokenAmount()), variables.ChiCost)
 	gasCost.Add(gasCost, chiCost)
-
-	// Add loan cost.
-	gasCost.Add(gasCost, t.LoanDebt())
 	return gasCost
 }
 
-// LoanChiRefund is the amount of gas that's going to get refunded.
-func (t *TradeOption) LoanChiRefund(gasPrice *big.Int) uint64 {
-	gasRatio := gasPrice.Uint64() / 5e9
-	efficiency := (24000 * gasRatio / (35678 + 6053*gasRatio)) * 100
-	refund := t.LoanGasTokenAmount() * 16000 * efficiency / 100
-	if refund > (t.LoanGasSpent() / 2) {
-		return t.LoanGasSpent() / 2
-	}
-	return refund
+// NormalChiRefund is the amount of gas that's going to get refunded.
+func (t *TradeOption) NormalChiRefund() uint64 {
+	// %50 refund
+	return (t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) / 2
 }
 
-// LoanGasSpent returns the gas spent for the circle.
-func (t *TradeOption) LoanGasSpent() uint64 {
+// NormalGasSpent returns the gas spent for the circle.
+func (t *TradeOption) NormalGasSpent() uint64 {
 	// Gas spent.
 	var gasSpent uint64 = 21000 // initialize gas.
 
@@ -97,15 +64,17 @@ func (t *TradeOption) LoanGasSpent() uint64 {
 	msgDataLength += uint64(len(t.AmountsOut) * 32)       // amounts out
 	msgDataLength += 20                                   // gas token
 	msgDataLength += 32                                   // gas token amount
-	msgDataLength += 32                                   // pool debt
 	msgDataLength += 1                                    // revert on reserve change
 	gasSpent += 16 * msgDataLength
 
-	// Get reserves call
-	gasSpent += uint64(len(t.Circle.Pairs) * 5000) // 5k gas each call.
+	// Get reserves call.
+	gasSpent += uint64(len(t.Circle.Pairs) * 10000) // 5k gas each call.
 
-	// Swap fees.
-	gasSpent += uint64(len(t.Circle.Pairs) * 94000) // 94K gas each swap.
+	// Transfer cost.
+	gasSpent += 29000
+
+	// Swap gas cost.
+	gasSpent += uint64(len(t.Circle.Pairs) * 68000) // 68K gas each swap.
 
 	// The burn tokens call.
 	gasSpent += 21000
@@ -113,9 +82,9 @@ func (t *TradeOption) LoanGasSpent() uint64 {
 	return gasSpent
 }
 
-// LoanGasTokenAmount returns the gas token amount to get used on loan swap.
-func (t *TradeOption) LoanGasTokenAmount() uint64 {
-	gasTokens := uint64((t.LoanGasSpent() + 14154) / 41947)
+// NormalGasTokenAmount returns the gas token amount to get used on swap.
+func (t *TradeOption) NormalGasTokenAmount() uint64 {
+	gasTokens := uint64((t.NormalGasSpent() + 14154) / 41947)
 	return gasTokens
 }
 
@@ -129,7 +98,7 @@ func (t *TradeOption) GetJSON() TradeOptionJSON {
 	// Route.
 	var pairsStr = make([]string, len(t.Circle.Pairs))
 	for i, val := range t.Circle.Pairs {
-		pairsStr[i] = val.Address.String()
+		pairsStr[i] = val.Address().String()
 	}
 
 	// Amounts.
@@ -143,7 +112,7 @@ func (t *TradeOption) GetJSON() TradeOptionJSON {
 		Symbols:      t.Circle.Symbols,
 		Pairs:        pairsStr,
 		AmountsOut:   amountsStr,
-		TriggerLimit: t.LoanTriggerProfit(variables.GasPrice),
+		TriggerLimit: t.NormalTriggerProfit(variables.GasPrice),
 	}
 }
 

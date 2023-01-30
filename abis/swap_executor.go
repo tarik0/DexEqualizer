@@ -35,14 +35,14 @@ type SwapParameters struct {
 	PairTokens            [][]common.Address
 	Path                  []common.Address
 	AmountsOut            []*big.Int
-	RevertOnReserveChange bool
 	GasToken              common.Address
-	UseGasToken           bool
+	GasTokenAmount        *big.Int
+	RevertOnReserveChange bool
 }
 
 // SwapExecutorV2MetaData contains all meta data concerning the SwapExecutorV2 contract.
 var SwapExecutorV2MetaData = &bind.MetaData{
-	ABI: "[{\"inputs\":[{\"components\":[{\"internalType\":\"address[]\",\"name\":\"Pairs\",\"type\":\"address[]\"},{\"internalType\":\"uint256[][]\",\"name\":\"Reserves\",\"type\":\"uint256[][]\"},{\"internalType\":\"address[][]\",\"name\":\"PairTokens\",\"type\":\"address[][]\"},{\"internalType\":\"address[]\",\"name\":\"Path\",\"type\":\"address[]\"},{\"internalType\":\"uint256[]\",\"name\":\"AmountsOut\",\"type\":\"uint256[]\"},{\"internalType\":\"bool\",\"name\":\"RevertOnReserveChange\",\"type\":\"bool\"},{\"internalType\":\"address\",\"name\":\"GasToken\",\"type\":\"address\"},{\"internalType\":\"bool\",\"name\":\"UseGasToken\",\"type\":\"bool\"}],\"internalType\":\"structSwapParameters\",\"name\":\"params\",\"type\":\"tuple\"}],\"name\":\"executeSwap\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
+	ABI: "[{\"inputs\":[{\"components\":[{\"internalType\":\"address[]\",\"name\":\"Pairs\",\"type\":\"address[]\"},{\"internalType\":\"uint256[][]\",\"name\":\"Reserves\",\"type\":\"uint256[][]\"},{\"internalType\":\"address[][]\",\"name\":\"PairTokens\",\"type\":\"address[][]\"},{\"internalType\":\"address[]\",\"name\":\"Path\",\"type\":\"address[]\"},{\"internalType\":\"uint256[]\",\"name\":\"AmountsOut\",\"type\":\"uint256[]\"},{\"internalType\":\"address\",\"name\":\"GasToken\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"GasTokenAmount\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"RevertOnReserveChange\",\"type\":\"bool\"}],\"internalType\":\"structSwapParameters\",\"name\":\"params\",\"type\":\"tuple\"}],\"name\":\"executeSwap\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
 }
 
 // SwapExecutorV2ABI is the input ABI used to generate the binding from.
@@ -191,23 +191,23 @@ func (_SwapExecutorV2 *SwapExecutorV2TransactorRaw) Transact(opts *bind.Transact
 	return _SwapExecutorV2.Contract.contract.Transact(opts, method, params...)
 }
 
-// ExecuteSwap is a paid mutator transaction binding the contract method 0xcae89ff8.
+// ExecuteSwap is a paid mutator transaction binding the contract method 0xb7eb21dc.
 //
-// Solidity: function executeSwap((address[],uint256[][],address[][],address[],uint256[],bool,address,bool) params) returns()
+// Solidity: function executeSwap((address[],uint256[][],address[][],address[],uint256[],address,uint256,bool) params) returns()
 func (_SwapExecutorV2 *SwapExecutorV2Transactor) ExecuteSwap(opts *bind.TransactOpts, params SwapParameters) (*types.Transaction, error) {
 	return _SwapExecutorV2.contract.Transact(opts, "executeSwap", params)
 }
 
-// ExecuteSwap is a paid mutator transaction binding the contract method 0xcae89ff8.
+// ExecuteSwap is a paid mutator transaction binding the contract method 0xb7eb21dc.
 //
-// Solidity: function executeSwap((address[],uint256[][],address[][],address[],uint256[],bool,address,bool) params) returns()
+// Solidity: function executeSwap((address[],uint256[][],address[][],address[],uint256[],address,uint256,bool) params) returns()
 func (_SwapExecutorV2 *SwapExecutorV2Session) ExecuteSwap(params SwapParameters) (*types.Transaction, error) {
 	return _SwapExecutorV2.Contract.ExecuteSwap(&_SwapExecutorV2.TransactOpts, params)
 }
 
-// ExecuteSwap is a paid mutator transaction binding the contract method 0xcae89ff8.
+// ExecuteSwap is a paid mutator transaction binding the contract method 0xb7eb21dc.
 //
-// Solidity: function executeSwap((address[],uint256[][],address[][],address[],uint256[],bool,address,bool) params) returns()
+// Solidity: function executeSwap((address[],uint256[][],address[][],address[],uint256[],address,uint256,bool) params) returns()
 func (_SwapExecutorV2 *SwapExecutorV2TransactorSession) ExecuteSwap(params SwapParameters) (*types.Transaction, error) {
 	return _SwapExecutorV2.Contract.ExecuteSwap(&_SwapExecutorV2.TransactOpts, params)
 }

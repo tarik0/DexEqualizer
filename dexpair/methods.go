@@ -6,30 +6,60 @@ import (
 	"math/big"
 )
 
+// Address is the pair address.
+func (d *DexPair) Address() common.Address {
+	return d.address
+}
+
+// TokenA is the A token address.
+func (d *DexPair) TokenA() common.Address {
+	return d.tokenA
+}
+
+// TokenB is the second token address.
+func (d *DexPair) TokenB() common.Address {
+	return d.tokenB
+}
+
+// GetLatestUpdateBlock returns the latest block that reserves are updated.
+func (d *DexPair) GetLatestUpdateBlock() (*big.Int, error) {
+	val := d.reservesAndLatestBlock.Load()
+	if val == nil || (val.([3]*big.Int))[2] == nil {
+		return nil, variables.InvalidInput
+	}
+	return (val.([3]*big.Int))[2], nil
+}
+
 // SetReserves updates the pair reserves.
-func (d *DexPair) SetReserves(reserveA *big.Int, reserveB *big.Int) {
-	d.reserveMutex.Lock()
-	d.ReserveA.Set(reserveA)
-	d.ReserveB.Set(reserveB)
-	d.reserveMutex.Unlock()
+func (d *DexPair) SetReserves(reserveA *big.Int, reserveB *big.Int, blockNum *big.Int) {
+	// Return if latest update block is greater.
+	latestUpdateBlock, err := d.GetLatestUpdateBlock()
+	if blockNum.Cmp(common.Big0) != 0 && err != nil && latestUpdateBlock.Cmp(blockNum) > 0 {
+		return
+	}
+
+	d.reservesAndLatestBlock.Store([3]*big.Int{reserveA, reserveB, blockNum})
+}
+
+// GetReserves returns the reserves.
+func (d *DexPair) GetReserves() []*big.Int {
+	val := d.reservesAndLatestBlock.Load().([3]*big.Int)
+	return []*big.Int{val[0], val[1]}
 }
 
 // GetSortedReserves sorts the reserves and returns.
 func (d *DexPair) GetSortedReserves(address common.Address) (reserveIn *big.Int, reserveOut *big.Int, err error) {
-	// Lock the reserve mutex.
-	d.reserveMutex.RLock()
+	// Get reserves.
+	val := d.reservesAndLatestBlock.Load().([3]*big.Int)
 
 	// Sort reserves.
-	if address == d.TokenA {
-		reserveIn, reserveOut, err = new(big.Int).Set(d.ReserveA), new(big.Int).Set(d.ReserveB), nil
-	} else if address == d.TokenB {
-		reserveIn, reserveOut, err = new(big.Int).Set(d.ReserveB), new(big.Int).Set(d.ReserveA), nil
+	if address == d.tokenA {
+		reserveIn, reserveOut, err = new(big.Int).Set(val[0]), new(big.Int).Set(val[1]), nil
+	} else if address == d.tokenB {
+		reserveIn, reserveOut, err = new(big.Int).Set(val[1]), new(big.Int).Set(val[0]), nil
 	} else {
 		reserveIn, reserveOut, err = nil, nil, variables.InvalidInput
 	}
-
-	// Unlock the reserve mutex.
-	d.reserveMutex.RUnlock()
 
 	return reserveIn, reserveOut, err
 }

@@ -5,7 +5,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/logger"
-	"github.com/tarik0/DexEqualizer/variables"
 	"math/big"
 )
 
@@ -41,20 +40,6 @@ func PrintTradeOption(option *circle.TradeOption) {
 	logger.Log.Infoln("Reserves")
 	for i, reserves := range option.Circle.PairReserves {
 		logger.Log.Infoln(fmt.Sprintf("[%d/%d] R0: %s, R1: %s", i, len(option.Circle.PairReserves), reserves[0].String(), reserves[1].String()))
-	}
-
-	logger.Log.Infoln("")
-	logger.Log.Infoln("Debt Amount:", option.LoanDebt())
-
-	loanDebt := new(big.Int).Mul(
-		new(big.Int).Sub(variables.Big10000, option.Circle.PairFees[0]),
-		option.AmountsOut[0],
-	)
-	loanDebt.Div(loanDebt, variables.Big10000)
-	if loanDebt.Cmp(option.LoanDebt()) != 0 {
-		logger.Log.
-			WithField("loanDebt", option.LoanDebt()).
-			WithField("realLoanDebt", loanDebt).Fatalln("Loan debt is not right!")
 	}
 
 	// Validate amounts.

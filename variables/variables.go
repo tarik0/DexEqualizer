@@ -37,4 +37,4 @@ var Wallet *wallet.Wallet
 
 // The contracts.
 
-var LoanExec *abis.FlashloanExecutorV2
+var SwapExec *abis.SwapExecutorV2

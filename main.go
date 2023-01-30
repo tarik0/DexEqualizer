@@ -37,8 +37,8 @@ import (
 
 var hub *ws.Hub
 
-// wsMessageSizeLimit is 50 MB
-const wsMessageSizeLimit = 50 * 1024 * 1024
+// wsMessageSizeLimit is 500 MB
+const wsMessageSizeLimit = 500 * 1024 * 1024
 
 //go:linkname newWebsocketCodec github.com/ethereum/go-ethereum/rpc.newWebsocketCodec
 func newWebsocketCodec(*websocket.Conn, string, http.Header) rpc.ServerCodec
@@ -111,10 +111,10 @@ func main() {
 
 	//////////////////////////////////////////////
 
-	// Load flashloan executor.
-	variables.LoanExec, err = abis.NewFlashloanExecutorV2(config.Parsed.Contracts.Executor, variables.EthClient)
+	// Load executor.
+	variables.SwapExec, err = abis.NewSwapExecutorV2(config.Parsed.Contracts.Executor, variables.EthClient)
 	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to load flashloan executor.")
+		logger.Log.WithError(err).Fatalln("Unable to load executor.")
 	}
 
 	// Check wallet.
@@ -169,7 +169,7 @@ func main() {
 	logger.Log.Infoln("  Chain ID          :", variables.ChainId.String())
 	logger.Log.Infoln("  WETH Addr         :", config.Parsed.Network.WETH.String())
 	logger.Log.Infoln("  Multicaller       :", config.Parsed.Contracts.Multicaller)
-	logger.Log.Infoln("  Flashloan Executor:", config.Parsed.Contracts.Executor)
+	logger.Log.Infoln("  Executor          :", config.Parsed.Contracts.Executor)
 	logger.Log.Infoln("")
 
 	if variables.IsDev {
@@ -205,15 +205,9 @@ func main() {
 }
 
 // onSort gets triggered on new sort event.
-func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdater) {
+func onSort(header *types.Header, options []*circle.TradeOption, updateTime time.Duration, u *updater.PairUpdater) {
 	// Check balance.
 	go checkBalance()
-
-	// Get trade options.
-	options := u.GetSortedTrades()
-	if options == nil {
-		return
-	}
 
 	// Skip if no trades.
 	if len(options) == 0 {
@@ -272,8 +266,8 @@ func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdat
 	// Check circles.
 	for _, swapCircle := range options {
 		// Check if profitable.
-		profit, _ := swapCircle.LoanProfit()
-		triggerLim := swapCircle.LoanTriggerProfit(variables.GasPrice)
+		profit, _ := swapCircle.NormalProfit()
+		triggerLim := swapCircle.NormalTriggerProfit(variables.GasPrice)
 		if profit.Cmp(triggerLim) < 0 {
 			return
 		}
@@ -294,7 +288,7 @@ func onSort(header *types.Header, updateTime time.Duration, u *updater.PairUpdat
 		}
 
 		// Trigger the best swap.
-		triggerSwap(swapCircle, triggerLim, profit, u)
+		triggerSwap(swapCircle, triggerLim, profit, header.Number, u)
 		break
 	}
 }
@@ -318,25 +312,24 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 	})
 
 	// Iterate over circles.
-	for i, swapCircle := range swapCircles {
+	for i, tradeOption := range swapCircles {
 		// The parameters.
-		param := abis.FlashloanParameters{
-			Pairs:                 swapCircle.Circle.PairAddresses,
-			Reserves:              swapCircle.Circle.PairReserves,
-			Path:                  swapCircle.Circle.Path,
-			AmountsOut:            swapCircle.AmountsOut,
-			PairTokens:            swapCircle.Circle.PairTokens,
+		param := abis.SwapParameters{
+			Pairs:                 tradeOption.Circle.PairAddresses,
+			Reserves:              tradeOption.Circle.PairReserves,
+			Path:                  tradeOption.Circle.Path,
+			AmountsOut:            tradeOption.AmountsOut,
+			PairTokens:            tradeOption.Circle.PairTokens,
 			GasToken:              config.Parsed.Contracts.GasToken,
-			GasTokenAmount:        new(big.Int).SetUint64(swapCircle.LoanGasTokenAmount()),
-			PoolDebt:              new(big.Int).Add(swapCircle.AmountsOut[0], swapCircle.LoanDebt()),
+			GasTokenAmount:        new(big.Int).SetUint64(tradeOption.NormalGasTokenAmount()),
 			RevertOnReserveChange: true,
 		}
 
 		// Estimate gas.
 		i := i
 		go func() {
-			// Execute flashloan.
-			tx, err := variables.LoanExec.ExecuteFlashloan(transactor, param)
+			// Execute.
+			tx, err := variables.SwapExec.ExecuteSwap(transactor, param)
 			if err != nil {
 				ch <- struct {
 					Id       int
@@ -384,7 +377,7 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 }
 
 // triggerSwap triggers a new swap with circle.
-func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int, u *updater.PairUpdater) {
+func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int, number *big.Int, u *updater.PairUpdater) {
 	// Broadcast buy.
 	go func() {
 		// Encoder.
@@ -428,23 +421,22 @@ func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int,
 	// Set transactor values.
 	transactor.GasPrice = variables.GasPrice
 	transactor.Value = common.Big0
-	transactor.GasLimit = tradeOption.LoanGasSpent() + tradeOption.LoanGasTokenAmount()*10000
+	transactor.GasLimit = tradeOption.NormalGasSpent() + tradeOption.NormalGasTokenAmount()*10000
 
 	// The parameter.
-	param := abis.FlashloanParameters{
+	param := abis.SwapParameters{
 		Pairs:                 tradeOption.Circle.PairAddresses,
 		Reserves:              tradeOption.Circle.PairReserves,
 		Path:                  tradeOption.Circle.Path,
 		AmountsOut:            tradeOption.AmountsOut,
 		PairTokens:            tradeOption.Circle.PairTokens,
 		GasToken:              config.Parsed.Contracts.GasToken,
-		GasTokenAmount:        new(big.Int).SetUint64(tradeOption.LoanGasTokenAmount()),
-		PoolDebt:              new(big.Int).Add(tradeOption.AmountsOut[0], tradeOption.LoanDebt()),
+		GasTokenAmount:        new(big.Int).SetUint64(tradeOption.NormalGasTokenAmount()),
 		RevertOnReserveChange: true,
 	}
 
 	// Send transaction.
-	tx, err := variables.LoanExec.ExecuteFlashloan(transactor, param)
+	tx, err := variables.SwapExec.ExecuteSwap(transactor, param)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
 			"circle": tradeOption.GetJSON(),
@@ -454,19 +446,20 @@ func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int,
 
 	// Add to the history.
 	u.TxHistoryAdd <- struct {
-		Tx     *types.Transaction
-		Option *circle.TradeOption
-	}{Tx: tx, Option: tradeOption}
+		Tx          *types.Transaction
+		Option      *circle.TradeOption
+		BlockNumber *big.Int
+	}{Tx: tx, Option: tradeOption, BlockNumber: number}
 
 	// Log transaction.
 	logger.Log.Infoln("")
 	logger.Log.WithFields(logrus.Fields{
 		"hash":            tx.Hash().String(),
 		"circle":          tradeOption.GetJSON(),
-		"profitLimit":     fmt.Sprintf("%.18f BNB", utils.WeiToEthers(tradeOption.LoanTriggerProfit(transactor.GasPrice))),
-		"gasSpent":        tradeOption.LoanGasSpent(),
-		"chiAmount":       tradeOption.LoanGasTokenAmount(),
-		"gasSpentWithChi": tradeOption.LoanGasSpent() - tradeOption.LoanChiRefund(transactor.GasPrice),
+		"profitLimit":     fmt.Sprintf("%.18f BNB", utils.WeiToEthers(tradeOption.NormalTriggerProfit(transactor.GasPrice))),
+		"gasSpent":        tradeOption.NormalGasSpent(),
+		"chiAmount":       tradeOption.NormalGasTokenAmount(),
+		"gasSpentWithChi": (tradeOption.NormalGasSpent() + tradeOption.NormalGasTokenAmount()*10000) - tradeOption.NormalChiRefund(),
 	}).Infoln("Arbitrage transaction sent!")
 	logger.Log.Infoln("")
 }

@@ -63,7 +63,7 @@ func loadAddresses(path string, isRouter bool) (
 
 		// Check if already added.
 		if slices.Contains(addresses, address) {
-			logger.Log.WithField("addr", address.String()).Infoln("Duplicate address detected! Skipping...")
+			logger.Log.WithField("addr", address.String()).Warningln("Duplicate address detected! Skipping...")
 			continue
 		}
 

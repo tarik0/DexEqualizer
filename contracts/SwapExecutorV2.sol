@@ -76,18 +76,18 @@ contract SwapExecutorV2 {
             IUniswapV2Pair(params.Pairs[i]).swap(amount0Out, amount1Out, to, new bytes(0));
         }
 
-        // Stop here if you don't want to use gas token.
-        if (!params.UseGasToken) return
-
-        // Burn gas token.
-        (success,) = address(params.GasToken).call(
-            abi.encodeWithSelector(
-                IChiToken.freeFromUpTo.selector,
-                msg.sender,
-                params.Pairs.length
-            )
-        );
-        require(success, "SE4");
+        // Burn gas if enabled.
+        if (params.GasTokenAmount > 0) {
+            // Burn gas token.
+            (success,) = address(params.GasToken).call(
+                abi.encodeWithSelector(
+                    IChiToken.freeFromUpTo.selector,
+                    msg.sender,
+                    params.GasTokenAmount
+                )
+            );
+            require(success, "SE4");
+        }
     }
 }
 

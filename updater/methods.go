@@ -20,8 +20,14 @@ func (p *PairUpdater) Start() error {
 		return variables.AlreadyStarted
 	}
 
+	// Get current block number.
+	blockNum, err := p.backend.BlockNumber(context.Background())
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to get block number.")
+	}
+	p.lastBlockNum.Store(blockNum)
+
 	// Find factories.
-	var err error
 	err = p.findFactories()
 	if err != nil {
 		return err
@@ -66,13 +72,6 @@ func (p *PairUpdater) Start() error {
 	// Subscribe to new pending transactions.
 	p.subscribeToPending()
 
-	// Get current block number.
-	blockNum, err := p.backend.BlockNumber(context.Background())
-	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to get block number.")
-	}
-	p.lastBlockNum.Store(blockNum)
-
 	// Start listening for new heads.
 	go func() {
 		var err error
@@ -87,6 +86,8 @@ func (p *PairUpdater) Start() error {
 			case header := <-p.blocksCh:
 				// Redirect to the listen method.
 				if header != nil {
+					// Update block number.
+					p.lastBlockNum.Swap(header.Number.Uint64())
 					go p.listenBlocks(header)
 				}
 			}
@@ -95,6 +96,11 @@ func (p *PairUpdater) Start() error {
 
 	// Start listening for new transactions.
 	go func() {
+		// Skip if node not supported.
+		if p.pendingSub == nil || p.pendingCh == nil {
+			return
+		}
+
 		for {
 			select {
 			case err = <-p.pendingSub.Err():
@@ -148,17 +154,6 @@ func (p *PairUpdater) GetTokenFee(addr common.Address) (*big.Int, error) {
 	}
 
 	return new(big.Int).Set(inFee), nil
-}
-
-// GetSortedTrades
-//	Returns sorted options.
-func (p *PairUpdater) GetSortedTrades() []*circle.TradeOption {
-	val := p.sortedTrades.Load()
-	if val == nil {
-		return nil
-	}
-
-	return val.([]*circle.TradeOption)
 }
 
 // GetBlockNumber
