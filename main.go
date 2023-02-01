@@ -453,14 +453,15 @@ func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int,
 
 	// Log transaction.
 	logger.Log.Infoln("")
-	logger.Log.WithFields(logrus.Fields{
-		"hash":            tx.Hash().String(),
-		"circle":          tradeOption.GetJSON(),
-		"profitLimit":     fmt.Sprintf("%.18f BNB", utils.WeiToEthers(tradeOption.NormalTriggerProfit(transactor.GasPrice))),
-		"gasSpent":        tradeOption.NormalGasSpent(),
-		"chiAmount":       tradeOption.NormalGasTokenAmount(),
-		"gasSpentWithChi": (tradeOption.NormalGasSpent() + tradeOption.NormalGasTokenAmount()*10000) - tradeOption.NormalChiRefund(),
-	}).Infoln("Arbitrage transaction sent!")
+	logger.Log.Infoln("Arbitrage Transaction Sent!")
+	logger.Log.Infoln("===========================")
+	logger.Log.Infoln("Hash     :", tx.Hash().String())
+	logger.Log.Infoln("Path     :", tradeOption.Circle.SymbolsStr())
+	logger.Log.Infoln("Pairs    :", tradeOption.Circle.PairAddressesStr())
+	logger.Log.Infoln("Profit   :", fmt.Sprintf("%.15f BNB", utils.WeiToEthers(profit)))
+	logger.Log.Infoln("Threshold:", fmt.Sprintf("%.15f BNB", utils.WeiToEthers(lim)))
+	logger.Log.Infoln("Gas Usage:", (tradeOption.NormalGasSpent()+tradeOption.NormalGasTokenAmount()*10000)-tradeOption.NormalChiRefund())
+	logger.Log.Infoln("Chi Usage:", tradeOption.NormalGasTokenAmount(), "CHI")
 	logger.Log.Infoln("")
 }
 

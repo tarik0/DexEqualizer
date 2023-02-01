@@ -18,7 +18,6 @@ import (
 	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/utils"
 	"github.com/tarik0/DexEqualizer/variables"
-	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 	"math/big"
 	"strings"
@@ -420,6 +419,8 @@ func (p *PairUpdater) findReserves() error {
 		}
 	}
 
+	logger.Log.WithField("blockNum", callBlockNum).Debugln("Pool reserves are found!")
+
 	return nil
 }
 
@@ -501,33 +502,32 @@ func (p *PairUpdater) findCircles() error {
 		RouteReserves: make([][]*big.Int, 0),
 	}
 
-	// Wait group.
-	var wg sync.WaitGroup
-
-	// The results map.
-	var resCount int32 = 0
-	var resMutex = sync.RWMutex{}
-
-	tmpCircles := make(map[uint64]*circle.Circle, 0)
+	// The results and the wait group.
+	var circleCh = make(chan *circle.Circle, config.Parsed.ArbitrageOptions.Limiters.MaxCircles)
+	var mutex = sync.RWMutex{}
+	var wg = sync.WaitGroup{}
 
 	// Start DFS.
 	wg.Add(1)
-	dfsUtilOnlyCircle(dfsParams, &tmpCircles, &resMutex, &resCount, &wg, p)
+	dfsUtilOnlyCircle(dfsParams, circleCh, &mutex, &wg, p)
 	wg.Wait()
+	close(circleCh)
 
 	// Limit circle amount.
-	circleLen := len(tmpCircles)
+	circleLen := len(circleCh)
 	if circleLen > int(config.Parsed.ArbitrageOptions.Limiters.MaxCircles) {
 		circleLen = int(config.Parsed.ArbitrageOptions.Limiters.MaxCircles)
 	}
 	p.Circles = make(map[uint64]*circle.Circle, circleLen)
 
-	// Shuffle circles.
-	tmpKeys := maps.Keys(tmpCircles)
-	for i := 0; i < circleLen; i++ {
-		key := tmpKeys[i]
-
-		p.Circles[key] = tmpCircles[key]
+	// Get the results.
+	for _circle := range circleCh {
+		_id := _circle.ID()
+		if _, ok := p.Circles[_id]; !ok {
+			p.Circles[_id] = _circle
+			logger.Log.Debugln(len(p.Circles), _circle.SymbolsStr())
+			logger.Log.Debugln(_circle.PairAddressesStr())
+		}
 	}
 
 	return nil
@@ -584,10 +584,19 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 	// Total time to update a block.
 	start := time.Now()
 
-	// Get the previous 3 block's logs.
+	// Get the latest block.
+	latestBlock, _ := p.GetLatestBlock()
+
+	// From block.
+	fromBlock := new(big.Int).Set(header.Number)
+	if header.Number.Uint64() != latestBlock {
+		fromBlock.SetUint64(latestBlock)
+	}
+
+	// Get the previous block logs.
 	prevLogs, err := p.backend.FilterLogs(context.Background(), ethereum.FilterQuery{
 		Addresses: p.PairAddresses,
-		FromBlock: header.Number,
+		FromBlock: fromBlock,
 		ToBlock:   header.Number,
 	})
 	if err != nil {
@@ -595,7 +604,7 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 	}
 
 	// Update events.
-	var wg sync.WaitGroup
+	p.filterLogsMutex.Lock()
 	for _, log := range prevLogs {
 		// Continue if not in addresses.
 		if _, ok := p.AddressToPair[log.Address]; !ok {
@@ -603,37 +612,29 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 		}
 
 		// Iterate over topics.
-		// TODO find a more efficient way to update.
-		wg.Add(1)
-		log := log
-		go func() {
-			defer wg.Done()
+		for _, topic := range log.Topics {
+			// Continue if topic is not sync.
+			if !bytes.EqualFold(syncId.Bytes(), topic.Bytes()) {
+				continue
+			}
 
-			for _, topic := range log.Topics {
-				// Continue if topic is not sync.
-				if !bytes.EqualFold(syncId.Bytes(), topic.Bytes()) {
-					continue
-				}
-
-				// Decode event.
-				syncDetails, err := pairAbi.Unpack("Sync", log.Data)
-				if err != nil {
-					logger.Log.WithError(err).Errorln("Unable to decode 'sync' events.")
-					break
-				}
-
-				// Update reserves.
-				resA, resB := syncDetails[0].(*big.Int), syncDetails[1].(*big.Int)
-				p.AddressToPair[log.Address].SetReserves(resA, resB, header.Number)
+			// Decode event.
+			syncDetails, err := pairAbi.Unpack("Sync", log.Data)
+			if err != nil {
+				logger.Log.WithError(err).Fatalln("Unable to decode 'sync' events.")
 				break
 			}
-		}()
-	}
 
-	wg.Wait()
+			// Update reserves.
+			resA, resB := syncDetails[0].(*big.Int), syncDetails[1].(*big.Int)
+			p.AddressToPair[log.Address].SetReserves(resA, resB, new(big.Int).SetUint64(log.BlockNumber))
+			break
+		}
+	}
+	p.filterLogsMutex.Unlock()
 
 	// Check if new blocks are already mined.
-	latestBlock, _ := p.GetLatestBlock()
+	latestBlock, _ = p.GetLatestBlock()
 	if latestBlock > header.Number.Uint64() {
 		logger.Log.
 			WithField("blockNum", header.Number.Uint64()).
@@ -642,6 +643,9 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 			Debugln("Block latency is too much! Skipping this block...")
 		return
 	}
+
+	// Swap last block number.
+	p.lastBlockNum.Swap(header.Number.Uint64())
 
 	// Sort start time.
 	sortStart := time.Now()
@@ -652,9 +656,6 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 	// Set update time.
 	sortTime := time.Since(sortStart)
 	updateTime := time.Since(start)
-
-	// Clear the transaction history.
-	p.TxHistoryReset <- true
 
 	// Check if new blocks are already mined.
 	latestBlock, _ = p.GetLatestBlock()
@@ -681,7 +682,8 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 	logger.Log.
 		WithField("updateTime", updateTime).
 		WithField("sortTime", sortTime).
-		WithField("blockNum", header.Number).
+		WithField("fromBlock", fromBlock).
+		WithField("toBlock", header.Number).
 		Debugln("New block mined!")
 
 	// Trigger event.
@@ -702,7 +704,54 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 	if err != nil && !isPending {
 		return
 	}
-	_ = isPending
+
+	// Get from.
+	msg, err := transaction.AsMessage(types.LatestSignerForChainID(variables.ChainId), big.NewInt(1))
+	if err != nil {
+		return
+	}
+
+	// Skip our transactions.
+	if bytes.EqualFold(msg.From().Bytes(), variables.Wallet.Address().Bytes()) {
+		return
+	}
+
+	// Check account nonce.
+	p.accountToPendingTxMutex.RLock()
+	prevAccountTx, ok := p.accountToPendingTx[msg.From()]
+	p.accountToPendingTxMutex.RUnlock()
+
+	// Check if there are already a pending transaction for that account.
+	if ok {
+		// Check nonce's.
+		if transaction.Nonce() == prevAccountTx.Nonce() {
+			// Check gas prices.
+			if transaction.GasPrice().Cmp(prevAccountTx.GasPrice()) > 0 {
+				// New transaction has same nonce but more gas.
+				// Replace the transaction.
+				p.accountToPendingTxMutex.Lock()
+				p.accountToPendingTx[msg.From()] = transaction
+				p.accountToPendingTxMutex.Unlock()
+			} else {
+				// New transaction has same nonce but less or same gas.
+				// Skip.
+				return
+			}
+		} else if transaction.Nonce() > prevAccountTx.Nonce() {
+			// Replace the transaction.
+			p.accountToPendingTxMutex.Lock()
+			p.accountToPendingTx[msg.From()] = transaction
+			p.accountToPendingTxMutex.Unlock()
+		} else {
+			// Skip if nonce is less.
+			return
+		}
+	} else {
+		// Add it to the transactions.
+		p.accountToPendingTxMutex.Lock()
+		p.accountToPendingTx[msg.From()] = transaction
+		p.accountToPendingTxMutex.Unlock()
+	}
 
 	// Filter out transactions.
 	if transaction == nil || transaction.To() == nil || transaction.Data() == nil {
@@ -716,17 +765,6 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 		return
 	}
 	if transaction.GasPrice().Cmp(variables.GasPrice) < 0 || transaction.Gas() < 50000 {
-		return
-	}
-
-	// Get from.
-	msg, err := transaction.AsMessage(types.LatestSignerForChainID(variables.ChainId), big.NewInt(1))
-	if err != nil {
-		return
-	}
-
-	// Skip our transactions.
-	if bytes.EqualFold(msg.From().Bytes(), variables.Wallet.Address().Bytes()) {
 		return
 	}
 
@@ -881,6 +919,10 @@ func (p *PairUpdater) listenHistory() {
 				p.hashToOptionHistory = make(map[common.Hash]*circle.TradeOption)
 				p.hashToTxHistory = make(map[common.Hash]*types.Transaction)
 				p.hashToTxBlock = make(map[common.Hash]*big.Int)
+
+				p.accountToPendingTxMutex.Lock()
+				p.accountToPendingTx = make(map[common.Address]*types.Transaction)
+				p.accountToPendingTxMutex.Unlock()
 			default:
 			case txInfo := <-p.TxHistoryAdd:
 				// Iterate over pair addresses.
@@ -898,7 +940,7 @@ func (p *PairUpdater) listenHistory() {
 				for prevTxHash, prevOption := range p.hashToOptionHistory {
 					// Get previous transaction's block number.
 					prevTxBlock := p.hashToTxBlock[prevTxHash]
-					latestBlock := p.lastBlockNum.Load().(*big.Int)
+					latestBlock := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
 					if latestBlock.Cmp(prevTxBlock) != 0 {
 						break
 					}
@@ -930,9 +972,17 @@ func (p *PairUpdater) listenHistory() {
 						continue
 					}
 
+					// Get from.
+					prevMsg, err := prevTx.AsMessage(types.LatestSignerForChainID(variables.ChainId), big.NewInt(1))
+					if err != nil {
+						logger.Log.WithError(err).Fatalln("Unable to get transaction as message.")
+					}
+
 					// Log fields.
 					logFields := logrus.Fields{
 						"targetTx":        searchInfo.TargetTx.Hash(),
+						"account":         prevMsg.From(),
+						"nonce":           prevMsg.Nonce(),
 						"ourTx":           prevTx.Hash(),
 						"pairAddr":        searchInfo.TargetPairAddr,
 						"updatedGasPrice": fmt.Sprintf("%.3f Gwei", utils.WeiToUnit(frontrunGasPrice, big.NewInt(9))),
@@ -941,6 +991,7 @@ func (p *PairUpdater) listenHistory() {
 					// Check if we are still in profit.
 					if tradeProfit.Cmp(newTradeProfitLimit) >= 0 {
 						logger.Log.WithFields(logFields).Infoln("Updating trade transaction to frontrun competitors...")
+						logger.Log.Infoln("")
 
 						// Increase the gas price and resend transaction again.
 						replacedTx := p.increaseTxGasPrice(prevTx, tradeOption, prevTxBlock, frontrunGasPrice)
@@ -1174,9 +1225,9 @@ func (p *PairUpdater) partition(arr []*circle.TradeOption, low, high int) ([]*ci
 	return arr, i
 }
 
-// dfsUtilDynamic
+// dfsUtilOnlyCircle
 //	Helper function.
-func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circle, resMutex *sync.RWMutex, resCount *int32, wg *sync.WaitGroup, u *PairUpdater) {
+func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mutex *sync.RWMutex, wg *sync.WaitGroup, u *PairUpdater) {
 	defer wg.Done()
 
 	// Temporary tokens.
@@ -1194,6 +1245,14 @@ func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circl
 		if len(params.Route) > config.Parsed.ArbitrageOptions.Limiters.MaxHops {
 			break
 		}
+
+		// Break if already results found.
+		mutex.RLock()
+		if len(resultsCh) == cap(resultsCh) {
+			mutex.RUnlock()
+			break
+		}
+		mutex.RUnlock()
 
 		// Skip if already visited.
 		if slices.Contains(params.Route, _pair.Address()) {
@@ -1283,12 +1342,16 @@ func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circl
 				logger.Log.WithError(err).Fatalln("Unable to generate new circle.")
 			}
 
-			// Increase counter.
-			resMutex.Lock()
-			circleId := arbCircle.ID()
-			(*circles)[circleId] = arbCircle
-			*resCount += 1
-			resMutex.Unlock()
+			// Break if already results found.
+			mutex.Lock()
+			if len(resultsCh) == cap(resultsCh) {
+				mutex.Unlock()
+				break
+			}
+
+			// Send circle to the channel.
+			resultsCh <- arbCircle
+			mutex.Unlock()
 		} else {
 			// The params.
 			newParams := DFSCircleParams{
@@ -1315,7 +1378,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, circles *map[uint64]*circle.Circl
 
 			// Recursive
 			wg.Add(1)
-			go dfsUtilOnlyCircle(newParams, circles, resMutex, resCount, wg, u)
+			go dfsUtilOnlyCircle(newParams, resultsCh, mutex, wg, u)
 		}
 	}
 }

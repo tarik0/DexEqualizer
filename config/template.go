@@ -30,7 +30,7 @@ type DexEqConfig struct {
 			StopBalance *big.Float `yaml:"Stop Balance"`
 			MaxHops     int        `yaml:"Max Hops"`
 			MinHops     int        `yaml:"Min Hops"`
-			MaxCircles  int32      `yaml:"Max Circles"`
+			MaxCircles  uint64     `yaml:"Max Circles"`
 		} `yaml:"Limiters"`
 		GasOptions struct {
 			ExtraGasPercent *big.Int `yaml:"Extra Gas Percent"`

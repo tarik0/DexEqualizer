@@ -32,9 +32,9 @@ func (d *DexPair) GetLatestUpdateBlock() (*big.Int, error) {
 
 // SetReserves updates the pair reserves.
 func (d *DexPair) SetReserves(reserveA *big.Int, reserveB *big.Int, blockNum *big.Int) {
-	// Return if latest update block is greater.
+	// Skip if blockNum < latestUpdateBlock
 	latestUpdateBlock, err := d.GetLatestUpdateBlock()
-	if blockNum.Cmp(common.Big0) != 0 && err != nil && latestUpdateBlock.Cmp(blockNum) > 0 {
+	if blockNum.Cmp(common.Big0) != 0 && err != nil && blockNum.Cmp(latestUpdateBlock) < 0 {
 		return
 	}
 

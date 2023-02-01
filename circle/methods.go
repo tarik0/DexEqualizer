@@ -16,7 +16,16 @@ func (c *Circle) ID() uint64 {
 
 // SymbolsStr is the path symbols as string.
 func (c *Circle) SymbolsStr() string {
-	return strings.Join(c.Symbols, "->")
+	return strings.Join(c.Symbols, " -> ")
+}
+
+// PairAddressesStr is the pair addresses as string.
+func (c *Circle) PairAddressesStr() string {
+	var tmp = make([]string, len(c.PairAddresses))
+	for i, addr := range c.PairAddresses {
+		tmp[i] = addr.String()
+	}
+	return strings.Join(tmp, " -> ")
 }
 
 // NormalProfit returns the profit.
@@ -48,8 +57,8 @@ func (t *TradeOption) NormalTriggerProfit(gasPrice *big.Int) *big.Int {
 
 // NormalChiRefund is the amount of gas that's going to get refunded.
 func (t *TradeOption) NormalChiRefund() uint64 {
-	// %50 refund
-	return (t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) / 2
+	// ~%45 refund
+	return (t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) * 45 / 100
 }
 
 // NormalGasSpent returns the gas spent for the circle.
@@ -74,7 +83,7 @@ func (t *TradeOption) NormalGasSpent() uint64 {
 	gasSpent += 29000
 
 	// Swap gas cost.
-	gasSpent += uint64(len(t.Circle.Pairs) * 68000) // 68K gas each swap.
+	gasSpent += uint64(len(t.Circle.Pairs) * 70000) // 70K gas each swap.
 
 	// The burn tokens call.
 	gasSpent += 21000

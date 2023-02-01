@@ -3,6 +3,7 @@ package updater
 import (
 	"context"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
 	"github.com/tarik0/DexEqualizer/logger"
@@ -10,6 +11,7 @@ import (
 	"github.com/tarik0/DexEqualizer/variables"
 	"golang.org/x/exp/maps"
 	"math/big"
+	"sync"
 )
 
 // Start
@@ -72,6 +74,9 @@ func (p *PairUpdater) Start() error {
 	// Subscribe to new pending transactions.
 	p.subscribeToPending()
 
+	// The filter logs mutex.
+	p.filterLogsMutex = sync.RWMutex{}
+
 	// Start listening for new heads.
 	go func() {
 		var err error
@@ -87,12 +92,17 @@ func (p *PairUpdater) Start() error {
 				// Redirect to the listen method.
 				if header != nil {
 					// Update block number.
-					p.lastBlockNum.Swap(header.Number.Uint64())
+					p.TxHistoryReset <- true
 					go p.listenBlocks(header)
 				}
 			}
 		}
 	}()
+
+	// Sometimes the pending transactions can have same account and nonce
+	// so the most profitable one for the miner will get selected.
+	p.accountToPendingTxMutex = sync.RWMutex{}
+	p.accountToPendingTx = make(map[common.Address]*types.Transaction)
 
 	// Start listening for new transactions.
 	go func() {
