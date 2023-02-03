@@ -1,4 +1,4 @@
-package ws
+package hub
 
 import (
 	"bytes"
@@ -20,7 +20,7 @@ func (h *Hub) Run() {
 				delete(h.clients, client)
 				close(client.send)
 			}
-		case message := <-h.Broadcast:
+		case message := <-h.broadcast:
 			for client := range h.clients {
 				select {
 				case client.send <- message:
@@ -61,11 +61,8 @@ func (h *Hub) sendHello(newClient *Client) {
 		logger.Log.WithError(err).Fatalln("Unable to marshal history.")
 	}
 
-	// Broadcast
+	// broadcast
 	newClient.send <- buff.Bytes()
-
-	// Get block numbers.
-	blockNum := h.updater.GetBlockNumber()
 
 	// Empty buffer.
 	buff = new(bytes.Buffer)
@@ -78,25 +75,15 @@ func (h *Hub) sendHello(newClient *Client) {
 		Data: RankReq{
 			Circles:     nil,
 			SortTime:    0,
-			BlockNumber: blockNum,
+			BlockNumber: 0,
 		},
 	})
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to marshal rank.")
 	}
 
-	// Broadcast
+	// broadcast
 	newClient.send <- buff.Bytes()
-}
-
-// AddToHistory
-//	Adds message to the history.
-func (h *Hub) AddToHistory(str MessageReq) {
-	logger.Log.Infoln(str.Message)
-
-	h.historyMutex.Lock()
-	h.history = append(h.history, str)
-	h.historyMutex.Unlock()
 }
 
 // ClearHistory
@@ -109,4 +96,59 @@ func (h *Hub) ClearHistory() {
 		h.history = make([]MessageReq, 0)
 		h.historyMutex.Unlock()
 	}
+}
+
+// BroadcastMsg broadcasts a message and adds it to the history.
+func (h *Hub) BroadcastMsg(msg string) error {
+	// Encoder.
+	var buff = new(bytes.Buffer)
+	e := json.NewEncoder(buff)
+	e.SetEscapeHTML(true)
+
+	// Marshall.
+	messageReq := MessageReq{
+		Timestamp: time.Now().Unix(),
+		Message:   msg,
+	}
+
+	// Append to history.
+	h.historyMutex.Lock()
+	h.history = append(h.history, messageReq)
+	h.historyMutex.Unlock()
+
+	// Encode.
+	err := e.Encode(WebsocketReq{
+		Type: "Message",
+		Data: messageReq,
+	})
+	if err != nil {
+		return err
+	}
+
+	h.broadcast <- buff.Bytes()
+	return nil
+}
+
+// BroadcastRanks broadcast a rank message.
+func (h *Hub) BroadcastRanks(trades interface{}, sortTime int64, blockNumber uint64) error {
+	// Encoder.
+	var buff = new(bytes.Buffer)
+	e := json.NewEncoder(buff)
+	e.SetEscapeHTML(true)
+
+	// Marshall.
+	err := e.Encode(WebsocketReq{
+		Type: "Rank",
+		Data: RankReq{
+			Circles:     trades,
+			SortTime:    sortTime,
+			BlockNumber: blockNumber,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	h.broadcast <- buff.Bytes()
+	return nil
 }

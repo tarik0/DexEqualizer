@@ -249,7 +249,7 @@
                 // History.
                 if (message.type === "History") {
                     for (let i = 0; i < message.Data.Messages.length; i++) {
-                        addNewMessage(message.Data.Timestamp, message.Data.Messages[i].Message)
+                        addNewMessage(message.Data.Messages[i].Timestamp, message.Data.Messages[i].Message)
                     }
                 }
             })

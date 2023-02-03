@@ -73,8 +73,7 @@ type PairUpdater struct {
 	hashToTxBlock       map[common.Hash]*big.Int
 
 	// Pending history.
-	accountToPendingTxMutex sync.RWMutex
-	accountToPendingTx      map[common.Address]*types.Transaction
+	accountToPendingTx sync.Map
 
 	// Atomic variables.
 	lastBlockNum    atomic.Value

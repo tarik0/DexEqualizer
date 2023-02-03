@@ -1,4 +1,4 @@
-package ws
+package hub
 
 // WebsocketReq
 //	A struct for websocket request.

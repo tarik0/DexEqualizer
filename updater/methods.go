@@ -3,7 +3,6 @@ package updater
 import (
 	"context"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
 	"github.com/tarik0/DexEqualizer/logger"
@@ -101,8 +100,7 @@ func (p *PairUpdater) Start() error {
 
 	// Sometimes the pending transactions can have same account and nonce
 	// so the most profitable one for the miner will get selected.
-	p.accountToPendingTxMutex = sync.RWMutex{}
-	p.accountToPendingTx = make(map[common.Address]*types.Transaction)
+	p.accountToPendingTx = sync.Map{}
 
 	// Start listening for new transactions.
 	go func() {

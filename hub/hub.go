@@ -1,7 +1,6 @@
-package ws
+package hub
 
 import (
-	"github.com/tarik0/DexEqualizer/updater"
 	"sync"
 )
 
@@ -12,16 +11,13 @@ type Hub struct {
 	clients map[*Client]bool
 
 	// Inbound messages from the clients.
-	Broadcast chan []byte
+	broadcast chan []byte
 
 	// Register requests from the clients.
 	register chan *Client
 
 	// Unregister requests from clients.
 	unregister chan *Client
-
-	// The updater.
-	updater *updater.PairUpdater
 
 	// The history.
 	history      []MessageReq
@@ -30,13 +26,12 @@ type Hub struct {
 
 // NewHub
 //	Generates a new hub.
-func NewHub(u *updater.PairUpdater) *Hub {
+func NewHub() *Hub {
 	return &Hub{
-		Broadcast:    make(chan []byte),
+		broadcast:    make(chan []byte),
 		register:     make(chan *Client),
 		unregister:   make(chan *Client),
 		clients:      make(map[*Client]bool),
-		updater:      u,
 		history:      make([]MessageReq, 0),
 		historyMutex: &sync.RWMutex{},
 	}

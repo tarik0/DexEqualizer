@@ -1,0 +1,11 @@
+{
+  "name": "hottokens",
+  "version": "1.0.0",
+  "dependencies": {
+    "@morpho-labs/ethers-multicall": "^3.0.3",
+    "ethers": "^5.7.2",
+    "ethers-multicall": "^0.2.3",
+    "request": "^2.88.2",
+    "web3-providers-ws": "^1.8.2"
+  }
+}

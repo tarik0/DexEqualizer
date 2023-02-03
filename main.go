@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/brahma-adshonor/gohook"
 	"github.com/ethereum/go-ethereum/common"
@@ -17,13 +15,13 @@ import (
 	"github.com/tarik0/DexEqualizer/addresses"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/config"
+	"github.com/tarik0/DexEqualizer/hub"
 	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/monitor"
 	"github.com/tarik0/DexEqualizer/updater"
 	"github.com/tarik0/DexEqualizer/utils"
 	"github.com/tarik0/DexEqualizer/variables"
 	"github.com/tarik0/DexEqualizer/wallet"
-	"github.com/tarik0/DexEqualizer/ws"
 	"golang.org/x/exp/slices"
 	"math/big"
 	"net/http"
@@ -32,10 +30,6 @@ import (
 	"time"
 	_ "unsafe"
 )
-
-// The webserver hub.
-
-var hub *ws.Hub
 
 // wsMessageSizeLimit is 500 MB
 const wsMessageSizeLimit = 500 * 1024 * 1024
@@ -107,6 +101,12 @@ func main() {
 	config.Parsed, err = config.LoadConfig(variables.ChainId)
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to import config.")
+	}
+
+	// Get the hot tokens from the API.
+	for tmp := utils.UpdateHotTokens(); tmp < 15; {
+		logger.Log.WithField("tokenCount", tmp).Infoln("Hot tokens API is not ready yet! Waiting 1 min...")
+		time.Sleep(1 * time.Minute)
 	}
 
 	//////////////////////////////////////////////
@@ -181,10 +181,10 @@ func main() {
 	monitor.SetWebHandler()
 
 	// New websocket server.
-	hub = ws.NewHub(u)
-	hub.SetHandler()
-	go hub.Run()
-	go hub.ClearHistory()
+	variables.Hub = hub.NewHub()
+	variables.Hub.SetHandler()
+	go variables.Hub.Run()
+	go variables.Hub.ClearHistory()
 
 	// Set onSort.
 	u.OnSort = onSort
@@ -215,7 +215,7 @@ func onSort(header *types.Header, options []*circle.TradeOption, updateTime time
 	}
 	options = options[:5]
 
-	// Broadcast ranks.
+	// broadcast ranks.
 	go func() {
 		// Print the best 5 options.
 		var tradesJson = make([]circle.TradeOptionJSON, 5)
@@ -227,21 +227,11 @@ func onSort(header *types.Header, options []*circle.TradeOption, updateTime time
 			}
 		}
 
-		// Marshall.
-		rankBytes, err := json.Marshal(ws.WebsocketReq{
-			Type: "Rank",
-			Data: ws.RankReq{
-				Circles:     tradesJson,
-				SortTime:    updateTime.Milliseconds(),
-				BlockNumber: header.Number.Uint64(),
-			},
-		})
+		// broadcast ranks
+		err := variables.Hub.BroadcastRanks(tradesJson, updateTime.Milliseconds(), header.Number.Uint64())
 		if err != nil {
 			logger.Log.WithError(err).Fatalln("Unable to marshal trade.")
 		}
-
-		// Broadcast
-		hub.Broadcast <- rankBytes
 	}()
 
 	// The pair addresses that we already took an action.
@@ -378,38 +368,17 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 
 // triggerSwap triggers a new swap with circle.
 func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int, number *big.Int, u *updater.PairUpdater) {
-	// Broadcast buy.
+	// broadcast buy.
 	go func() {
-		// Encoder.
-		var buff = new(bytes.Buffer)
-		e := json.NewEncoder(buff)
-		e.SetEscapeHTML(true)
-
-		// Marshall.
-		msg := ws.MessageReq{
-			Timestamp: time.Now().UnixMilli(),
-			Message: fmt.Sprintf(
-				"%s circle has passed the trigger limit of %.5f WBNB! (%.5f WBNB)",
-				tradeOption.Circle.SymbolsStr(),
-				utils.WeiToEthers(lim),
-				utils.WeiToEthers(profit),
-			),
-		}
-
-		// Encode.
-		err := e.Encode(ws.WebsocketReq{
-			Type: "Message",
-			Data: msg,
-		})
+		err := variables.Hub.BroadcastMsg(fmt.Sprintf(
+			"(%s) circle has passed the trigger limit of %.5f WBNB! (%.5f WBNB)",
+			tradeOption.Circle.SymbolsStr(),
+			utils.WeiToEthers(lim),
+			utils.WeiToEthers(profit),
+		))
 		if err != nil {
-			logger.Log.WithError(err).Fatalln("Unable to marshal message.")
+			logger.Log.WithError(err).Errorln("Unable to send message to the hub.")
 		}
-
-		// Add to history.
-		hub.AddToHistory(msg)
-
-		// Broadcast
-		hub.Broadcast <- buff.Bytes()
 	}()
 
 	// New transactor.

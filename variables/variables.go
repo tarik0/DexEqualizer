@@ -5,6 +5,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/tarik0/DexEqualizer/abis"
+	"github.com/tarik0/DexEqualizer/hub"
 	"github.com/tarik0/DexEqualizer/wallet"
 	"math/big"
 )
@@ -38,3 +39,7 @@ var Wallet *wallet.Wallet
 // The contracts.
 
 var SwapExec *abis.SwapExecutorV2
+
+// The websocket.
+
+var Hub *hub.Hub
