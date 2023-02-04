@@ -689,7 +689,7 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 
 	// Get transaction details.
 	transaction, isPending, err := variables.EthClient.TransactionByHash(context.Background(), *hash)
-	if err != nil && !isPending {
+	if err != nil || transaction == nil || isPending != false {
 		return
 	}
 
@@ -886,6 +886,12 @@ func (p *PairUpdater) listenHistory() {
 			select {
 			// Reset channel is prioritized.
 			case _ = <-p.TxHistoryReset:
+				// Clear account pending history.
+				p.accountToPendingTx.Range(func(key interface{}, value interface{}) bool {
+					p.accountToPendingTx.Delete(key)
+					return true
+				})
+
 				// Reset the history.
 				if len(p.hashToTxHistory) == 0 {
 					continue
@@ -895,12 +901,6 @@ func (p *PairUpdater) listenHistory() {
 				p.hashToOptionHistory = make(map[common.Hash]*circle.TradeOption)
 				p.hashToTxHistory = make(map[common.Hash]*types.Transaction)
 				p.hashToTxBlock = make(map[common.Hash]*big.Int)
-
-				// Clear account pending history.
-				p.accountToPendingTx.Range(func(key interface{}, value interface{}) bool {
-					p.accountToPendingTx.Delete(key)
-					return true
-				})
 			default:
 			case txInfo := <-p.TxHistoryAdd:
 				// Iterate over pair addresses.
@@ -931,6 +931,12 @@ func (p *PairUpdater) listenHistory() {
 					// Get the previous transaction.
 					prevTx := p.hashToTxHistory[prevTxHash]
 					tradeOption := p.hashToOptionHistory[prevTxHash]
+
+					// Continue if block has already passed.
+					if prevTxBlock.Uint64() >= p.GetHighestBlockNumber() {
+						logger.Log.WithField("hash", prevTxHash.String()).Infoln("Block has already passed! Skipping this transaction...")
+						continue
+					}
 
 					// Continue if gas price is lower.
 					if prevTx.GasPrice().Cmp(searchInfo.TargetTx.GasPrice()) > 0 {
@@ -1012,6 +1018,7 @@ func (p *PairUpdater) listenHistory() {
 // increaseTxGasPrice
 //	Increases the transaction's gas price and re-sends it again.
 func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.TradeOption, prevBlock *big.Int, targetGasPrice *big.Int) *types.Transaction {
+
 	// Replace transaction.
 	replaceTransaction := types.NewTx(&types.LegacyTx{
 		Nonce:    tx.Nonce(),
@@ -1044,7 +1051,9 @@ func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.T
 	}).Infoln("Replacement transaction sent!")
 
 	// Broadcast message.
-	err = variables.Hub.BroadcastMsg("Transaction got updated!")
+	err = variables.Hub.BroadcastMsg(
+		fmt.Sprintf("Transaction's gas price got updated! (%.3f Gwei)", utils.WeiToUnit(targetGasPrice, big.NewInt(9))),
+	)
 	if err != nil {
 		logger.Log.WithError(err).Errorln("Unable to broadcast message.")
 	}
@@ -1089,7 +1098,7 @@ func (p *PairUpdater) cancelTx(tx *types.Transaction, option *circle.TradeOption
 	}).Infoln("Blank transaction sent!")
 
 	// Broadcast message.
-	err = variables.Hub.BroadcastMsg("Transaction got canceled because It's not profitable anymore.!")
+	err = variables.Hub.BroadcastMsg("Transaction got canceled because It's not profitable anymore!")
 	if err != nil {
 		logger.Log.WithError(err).Errorln("Unable to broadcast message.")
 	}
