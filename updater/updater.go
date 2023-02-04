@@ -76,8 +76,9 @@ type PairUpdater struct {
 	accountToPendingTx sync.Map
 
 	// Atomic variables.
-	lastBlockNum    atomic.Value
-	filterLogsMutex sync.RWMutex
+	highestBlockNum  atomic.Value
+	lastSyncBlockNum atomic.Value
+	filterLogsMutex  sync.RWMutex
 
 	// Other variables.
 	params     *PairUpdaterParams
@@ -123,17 +124,15 @@ type DFSCircleParams struct {
 // DebugTraceCall
 // A response struct.
 type DebugTraceCall struct {
-	Failed      bool   `json:"failed"`
-	Gas         int    `json:"gas"`
-	ReturnValue string `json:"returnValue"`
-	StructLogs  []struct {
-		Depth   int      `json:"depth"`
-		Gas     int      `json:"gas"`
-		GasCost int      `json:"gasCost"`
-		Op      string   `json:"op"`
-		Pc      int      `json:"PC"`
-		Stack   []string `json:"stack"`
-	} `json:"structLogs"`
+	Calls   []DebugTraceCall `json:"calls"`
+	From    common.Address   `json:"from"`
+	Gas     string           `json:"gas"`
+	GasUsed string           `json:"gasUsed"`
+	Input   string           `json:"input"`
+	Output  string           `json:"output"`
+	To      common.Address   `json:"to"`
+	Type    string           `json:"type"`
+	Value   string           `json:"value"`
 }
 
 // NewPairUpdater

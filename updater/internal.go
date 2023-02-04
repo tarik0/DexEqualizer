@@ -68,7 +68,7 @@ func (p *PairUpdater) findFactories() error {
 	}
 
 	// Multi call factories.
-	callBlockNum := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
+	callBlockNum := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
 	_, returnBytes, err := p.multiCall(abiList, contractAddresses, functionNames, functionArgs, callBlockNum)
 	if err != nil {
 		return err
@@ -177,7 +177,7 @@ func (p *PairUpdater) findPairAddresses() error {
 		wg.Add(1)
 
 		// Start routine.
-		callBlockNum := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
+		callBlockNum := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
 		go func(addresses []common.Address, funcNames []string, funcArgs [][]interface{}) {
 			defer wg.Done()
 
@@ -335,7 +335,7 @@ func (p *PairUpdater) findReserves() error {
 	})
 
 	// Get current block number.
-	callBlockNum := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
+	callBlockNum := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
 
 	// Start workers.
 	for chunkId := 0; chunkId < len(contractAddressesChunks); chunkId++ {
@@ -452,7 +452,7 @@ func (p *PairUpdater) findDecimals() error {
 	}
 
 	// Multi call factories.
-	callBlockNum := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
+	callBlockNum := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
 	_, returnBytes, err := p.multiCall(abiList, contractAddresses, functionNames, functionArgs, callBlockNum)
 	if err != nil {
 		return err
@@ -585,12 +585,12 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 	start := time.Now()
 
 	// Get the latest block.
-	latestBlock, _ := p.GetLatestBlock()
+	lastSyncBlockNum := p.GetLastSyncBlockNumber()
 
 	// From block.
 	fromBlock := new(big.Int).Set(header.Number)
-	if header.Number.Uint64() != latestBlock {
-		fromBlock.SetUint64(latestBlock)
+	if header.Number.Uint64() != lastSyncBlockNum {
+		fromBlock.SetUint64(lastSyncBlockNum)
 	}
 
 	// Get the previous block logs.
@@ -603,7 +603,7 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 		logger.Log.WithError(err).Fatalln("Unable to get previous logs.")
 	}
 
-	// Update events.
+	// Update reserves.
 	p.filterLogsMutex.Lock()
 	for _, log := range prevLogs {
 		// Continue if not in addresses.
@@ -631,64 +631,52 @@ func (p *PairUpdater) listenBlocks(header *types.Header) {
 			break
 		}
 	}
+	p.lastSyncBlockNum.Swap(header.Number.Uint64())
 	p.filterLogsMutex.Unlock()
+
 	updateTime := time.Since(start)
-
-	// Check if new blocks are already mined.
-	latestBlock, _ = p.GetLatestBlock()
-	if latestBlock > header.Number.Uint64() {
-		logger.Log.
-			WithField("blockNum", header.Number.Uint64()).
-			WithField("latestBlockNum", latestBlock).
-			WithField("updateTime", time.Since(start)).
-			Debugln("Block latency is too much! Skipping this block...")
-		return
-	}
-
-	// Swap last block number.
-	p.lastBlockNum.Swap(header.Number.Uint64())
-
-	// Sort start time.
-	sortStart := time.Now()
-
-	// Sort the circles.
-	sortedTradeOptions := p.sortCircles()
-
-	// Set update time.
-	sortTime := time.Since(sortStart)
-
-	// Check if new blocks are already mined.
-	latestBlock, _ = p.GetLatestBlock()
-	if latestBlock > header.Number.Uint64() {
-		logger.Log.
-			WithField("updateTime", updateTime).
-			WithField("sortTime", sortTime).
-			WithField("blockNum", header.Number.Uint64()).
-			WithField("latestBlockNum", latestBlock).
-			Debugln("Block latency is too much! Skipping this block...")
-		return
-	}
-
-	// Check if it took too much time.
-	if updateTime+sortTime > 1*time.Second {
-		logger.Log.
-			WithField("updateTime", updateTime).
-			WithField("sortTime", sortTime).
-			WithField("blockNum", header.Number.Uint64()).
-			Debugln("Block latency is too much! Skipping this block...")
-		return
-	}
-
 	logger.Log.
 		WithField("updateTime", updateTime).
-		WithField("sortTime", sortTime).
 		WithField("fromBlock", fromBlock).
 		WithField("toBlock", header.Number).
-		Debugln("New block mined!")
+		Debugln("Synced with the block.")
+
+	// Sort the circles.
+	sortStart := time.Now()
+	sortedTradeOptions := p.sortCircles()
+	sortTime := time.Since(sortStart)
+
+	// Trigger sort listener.
+	p.listenSort(sortedTradeOptions, header, updateTime, sortTime)
+}
+
+// listenSort
+//	Listens new block updates.
+func (p *PairUpdater) listenSort(options []*circle.TradeOption, header *types.Header, updateTime time.Duration, sortTime time.Duration) {
+	// Check if block has already passed.
+	highestBlockNum := p.GetHighestBlockNumber()
+	if highestBlockNum > header.Number.Uint64() || updateTime+sortTime > 2*time.Second {
+		logger.Log.
+			WithField("updateTime", updateTime).
+			WithField("blockNum", header.Number.Uint64()).
+			WithField("latestBlockNum", highestBlockNum).
+			Debugln("Block latency is too much! Skipping this block...")
+		return
+	}
+
+	// Skip if no trades.
+	if len(options) == 0 {
+		return
+	}
+
+	// Limit options to best 5.
+	if len(options) > 5 {
+		options = options[:5]
+	}
 
 	// Trigger event.
-	if p.OnSort != nil && len(sortedTradeOptions) > 0 {
-		p.OnSort(header, sortedTradeOptions, sortTime+updateTime, p)
+	if p.OnSort != nil && len(options) > 0 {
+		p.OnSort(header, options, sortTime+updateTime, p)
 	}
 }
 
@@ -749,7 +737,7 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 	}
 
 	// Filter out transactions.
-	if transaction == nil || transaction.To() == nil || transaction.Data() == nil {
+	if transaction.To() == nil || transaction.Data() == nil {
 		return
 	}
 	if len(transaction.Data()) < 4 {
@@ -759,7 +747,7 @@ func (p *PairUpdater) listenPending(hash *common.Hash) {
 		transaction.To().String() == "0x000000000000000000000000000000000000dEaD" {
 		return
 	}
-	if transaction.GasPrice().Cmp(variables.GasPrice) < 0 || transaction.Gas() < 50000 {
+	if transaction.GasPrice().Cmp(variables.GasPrice) < 0 || transaction.Gas() < 70000 {
 		return
 	}
 
@@ -811,12 +799,19 @@ func (p *PairUpdater) dynamicSearch(msg types.Message, transaction *types.Transa
 	simulationTx["data"] = "0x" + hex.EncodeToString(transaction.Data())
 	simulationTx["nonce"] = fmt.Sprintf("0x%x", transaction.Nonce())
 
+	// Tracer options.
+	tracerOptions := make(map[string]interface{})
+	tracerOptions["onlyTopCall"] = "false"
+	tracerOptions["withLog"] = "true"
+
 	// Options.
 	options := make(map[string]interface{})
 	options["disableStorage"] = true
 	options["disableStack"] = false
 	options["enableMemory"] = false
-	options["timeout"] = "250ms"
+	options["timeout"] = "75ms"
+	options["tracer"] = "callTracer"
+	options["tracerConfig"] = tracerOptions
 
 	// Trace as call.
 	var traceCallRes DebugTraceCall
@@ -829,48 +824,34 @@ func (p *PairUpdater) dynamicSearch(msg types.Message, transaction *types.Transa
 		return
 	}
 
-	// Return if not successfully.
-	if traceCallRes.Failed {
-		return
-	}
+	// Pair addresses channel.
+	var wg sync.WaitGroup
+	var pairAddrsCh chan common.Address
 
-	// Limit the logs. (max 1k)
-	structLimit := len(traceCallRes.StructLogs)
-	if structLimit > 999 {
-		structLimit = 999
-	}
-
-	// Iterate over trace call
-	var pairAddress = make([]common.Address, 0)
-	for i, structLog := range traceCallRes.StructLogs[:structLimit] {
-		// Check the previous log.
-		if i == 0 || !strings.HasPrefix(traceCallRes.StructLogs[i-1].Op, "PUSH") {
-			continue
+	// Recursive checker function.
+	var checkCall func(DebugTraceCall)
+	checkCall = func(call DebugTraceCall) {
+		defer wg.Done()
+		if slices.Contains(p.PairAddresses, call.To) {
+			pairAddrsCh <- call.To
 		}
 
-		// Check the stack.
-		for _, stackVal := range structLog.Stack {
-			// Check if it's an address.
-			if !common.IsHexAddress(stackVal) {
-				continue
-			}
-
-			// Check if address is a pair.
-			tmpAddr := common.HexToAddress(stackVal)
-			if slices.Contains(p.PairAddresses, tmpAddr) {
-				pairAddress = append(pairAddress, tmpAddr)
-				break
+		// Check sub calls.
+		if call.Calls != nil && len(call.Calls) > 0 {
+			for _, subCall := range call.Calls {
+				wg.Add(1)
+				go checkCall(subCall)
 			}
 		}
 	}
 
-	// Check if it's a swap that includes our pairs.
-	if len(pairAddress) == 0 {
-		return
-	}
+	// Wait checker.
+	wg.Add(1)
+	go checkCall(traceCallRes)
+	wg.Wait()
 
 	// Send to the search channel.
-	for _, pairAddr := range pairAddress {
+	for pairAddr := range pairAddrsCh {
 		p.TxHistorySearch <- struct {
 			TargetTx       *types.Transaction
 			TargetPairAddr common.Address
@@ -937,7 +918,7 @@ func (p *PairUpdater) listenHistory() {
 				for prevTxHash, prevOption := range p.hashToOptionHistory {
 					// Get previous transaction's block number.
 					prevTxBlock := p.hashToTxBlock[prevTxHash]
-					latestBlock := new(big.Int).SetUint64(p.lastBlockNum.Load().(uint64))
+					latestBlock := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
 					if latestBlock.Cmp(prevTxBlock) != 0 {
 						break
 					}
@@ -961,7 +942,7 @@ func (p *PairUpdater) listenHistory() {
 					frontrunGasPrice.Div(frontrunGasPrice, big.NewInt(100))
 
 					// Calculate the profit limit of the option.
-					newTradeProfitLimit := prevOption.NormalTriggerProfit(frontrunGasPrice)
+					newTradeProfitLimit := prevOption.GetTradeCost(frontrunGasPrice)
 					tradeProfit, err := prevOption.NormalProfit()
 					if err != nil {
 						logger.Log.WithError(err).Errorln("Unable to calculate trade profit.")
@@ -1050,19 +1031,6 @@ func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.T
 		logger.Log.WithError(err).Fatalln("Unable to sign replacement transaction.")
 	}
 
-	// Check if block has passed.
-	for _, _pair := range option.Circle.Pairs {
-		latestBlockNum, _ := p.GetLatestBlock()
-		if prevBlock.Uint64() != latestBlockNum {
-			logger.Log.WithFields(logrus.Fields{
-				"pairAddr":          _pair.Address().String(),
-				"latestBlock":       latestBlockNum,
-				"latestUpdateBlock": prevBlock.Uint64(),
-			}).Warningln("Block has already passed! Skipping updating...")
-			return nil
-		}
-	}
-
 	// Send the transaction.
 	err = p.backend.SendTransaction(context.Background(), signedTx)
 	if err != nil {
@@ -1106,19 +1074,6 @@ func (p *PairUpdater) cancelTx(tx *types.Transaction, option *circle.TradeOption
 	signedTx, err := signer.Signer(signer.From, blankTx)
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to sign blank transaction.")
-	}
-
-	// Check if block has passed.
-	for _, _pair := range option.Circle.Pairs {
-		latestBlockNum, _ := p.GetLatestBlock()
-		if prevBlock.Uint64() != latestBlockNum {
-			logger.Log.WithFields(logrus.Fields{
-				"pairAddr":          _pair.Address().String(),
-				"latestBlock":       latestBlockNum,
-				"latestUpdateBlock": prevBlock.Uint64(),
-			}).Warningln("Block has already passed! Too late for cancelling...")
-			return nil
-		}
 	}
 
 	// Send the transaction.

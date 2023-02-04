@@ -44,8 +44,8 @@ func (t *TradeOption) NormalProfit() (*big.Int, error) {
 	return profit, nil
 }
 
-// NormalTriggerProfit returns the minimum amount of profit we need to trigger a swap.
-func (t *TradeOption) NormalTriggerProfit(gasPrice *big.Int) *big.Int {
+// GetTradeCost returns trade cost of this option.
+func (t *TradeOption) GetTradeCost(gasPrice *big.Int) *big.Int {
 	gasCost := new(big.Int).SetUint64((t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) - t.NormalChiRefund())
 	gasCost.Mul(gasCost, gasPrice)
 
@@ -55,10 +55,30 @@ func (t *TradeOption) NormalTriggerProfit(gasPrice *big.Int) *big.Int {
 	return gasCost
 }
 
+// MaxGasPrice returns the maximum gas price for this option to profit.
+func (t *TradeOption) MaxGasPrice() (*big.Int, error) {
+	// Get profit.
+	profit, err := t.NormalProfit()
+	if err != nil {
+		return nil, err
+	}
+
+	// Subtract the chi cost.
+	chiCost := new(big.Int).Mul(new(big.Int).SetUint64(t.NormalGasTokenAmount()), variables.ChiCost)
+	profit.Sub(profit, chiCost)
+
+	// Gas usage.
+	gasCost := new(big.Int).SetUint64((t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) - t.NormalChiRefund())
+
+	// Calculate max gas price.
+	profit.Div(profit, gasCost)
+	return profit, nil
+}
+
 // NormalChiRefund is the amount of gas that's going to get refunded.
 func (t *TradeOption) NormalChiRefund() uint64 {
-	// ~%45 refund
-	return (t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) * 45 / 100
+	// ~%46 refund
+	return (t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) * 46 / 100
 }
 
 // NormalGasSpent returns the gas spent for the circle.
@@ -121,7 +141,7 @@ func (t *TradeOption) GetJSON() TradeOptionJSON {
 		Symbols:      t.Circle.Symbols,
 		Pairs:        pairsStr,
 		AmountsOut:   amountsStr,
-		TriggerLimit: t.NormalTriggerProfit(variables.GasPrice),
+		TriggerLimit: t.GetTradeCost(variables.GasPrice),
 	}
 }
 

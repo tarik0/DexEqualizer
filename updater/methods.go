@@ -26,7 +26,8 @@ func (p *PairUpdater) Start() error {
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to get block number.")
 	}
-	p.lastBlockNum.Store(blockNum)
+	p.highestBlockNum.Store(blockNum)
+	p.lastSyncBlockNum.Store(blockNum)
 
 	// Find factories.
 	err = p.findFactories()
@@ -92,6 +93,7 @@ func (p *PairUpdater) Start() error {
 				if header != nil {
 					// Update block number.
 					p.TxHistoryReset <- true
+					p.highestBlockNum.Store(header.Number.Uint64())
 					go p.listenBlocks(header)
 				}
 			}
@@ -164,10 +166,21 @@ func (p *PairUpdater) GetTokenFee(addr common.Address) (*big.Int, error) {
 	return new(big.Int).Set(inFee), nil
 }
 
-// GetBlockNumber
+// GetLastSyncBlockNumber
 //	Returns the latest block number.
-func (p *PairUpdater) GetBlockNumber() uint64 {
-	val := p.lastBlockNum.Load()
+func (p *PairUpdater) GetLastSyncBlockNumber() uint64 {
+	val := p.lastSyncBlockNum.Load()
+	if val == nil {
+		return uint64(0)
+	}
+
+	return val.(uint64)
+}
+
+// GetHighestBlockNumber
+//	Returns the highest block number.
+func (p *PairUpdater) GetHighestBlockNumber() uint64 {
+	val := p.highestBlockNum.Load()
 	if val == nil {
 		return uint64(0)
 	}
@@ -413,14 +426,4 @@ func (p *PairUpdater) GetAmountsOut(
 	}
 
 	return amountsOut, nil
-}
-
-// GetLatestBlock returns the latest block.
-func (p *PairUpdater) GetLatestBlock() (uint64, error) {
-	pointer := p.lastBlockNum.Load()
-	if pointer == nil {
-		return 0, variables.InvalidInput
-	}
-
-	return pointer.(uint64), nil
 }

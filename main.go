@@ -104,7 +104,7 @@ func main() {
 	}
 
 	// Get the hot tokens from the API.
-	for tmp := utils.UpdateHotTokens(); tmp < 15; {
+	for tmp := utils.UpdateHotTokens(); tmp < 5; {
 		logger.Log.WithField("tokenCount", tmp).Infoln("Hot tokens API is not ready yet! Waiting 1 min...")
 		time.Sleep(1 * time.Minute)
 	}
@@ -209,12 +209,6 @@ func onSort(header *types.Header, options []*circle.TradeOption, updateTime time
 	// Check balance.
 	go checkBalance()
 
-	// Skip if no trades.
-	if len(options) == 0 {
-		return
-	}
-	options = options[:5]
-
 	// broadcast ranks.
 	go func() {
 		// Print the best 5 options.
@@ -257,7 +251,7 @@ func onSort(header *types.Header, options []*circle.TradeOption, updateTime time
 	for _, swapCircle := range options {
 		// Check if profitable.
 		profit, _ := swapCircle.NormalProfit()
-		triggerLim := swapCircle.NormalTriggerProfit(variables.GasPrice)
+		triggerLim := swapCircle.GetTradeCost(variables.GasPrice)
 		if profit.Cmp(triggerLim) < 0 {
 			return
 		}
@@ -425,6 +419,7 @@ func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int,
 	logger.Log.Infoln("Arbitrage Transaction Sent!")
 	logger.Log.Infoln("===========================")
 	logger.Log.Infoln("Hash     :", tx.Hash().String())
+	logger.Log.Infoln("Block    :", number)
 	logger.Log.Infoln("Path     :", tradeOption.Circle.SymbolsStr())
 	logger.Log.Infoln("Pairs    :", tradeOption.Circle.PairAddressesStr())
 	logger.Log.Infoln("Profit   :", fmt.Sprintf("%.15f BNB", utils.WeiToEthers(profit)))
