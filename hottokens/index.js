@@ -12,7 +12,7 @@ const TransferEventId = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55
 const SwapEventId = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822";
 
 // Maximum token count.
-const MaxTokenCount = 500;
+const MaxTokenCount = 3000;
 const ResetInterval = 86400 * 1000;
 
 // zeroPad allows the user to pad number with leading zeros.
@@ -20,7 +20,7 @@ const zeroPad = (num, places) => String(num).padStart(places, '0')
 
 // loadRouters loads the router addresses from file.
 async function loadRouters(chainId) {
-    const fileStream = fs.createReadStream(`../chains/${chainId}/routers.txt`);
+    const fileStream = fs.createReadStream(`./chains/${chainId}/routers.txt`);
 
     const rl = readline.createInterface({
         input: fileStream,
@@ -100,11 +100,6 @@ async function main() {
     let tokenUsageMap = new Map();
     let sortedUsageMap = new Map();
 
-    // Clear the usage map per day.
-    setInterval(() => {
-        tokenUsageMap.clear();
-    }, ResetInterval)
-
     // Sort the usages per 1 min.
     setInterval(async () => {
         // Get token fee infos.
@@ -117,6 +112,7 @@ async function main() {
                 feeInfo = await getTokenFee(address);
             } catch (e) {
                 console.error(`Unable to get token fee for ${address}: ${e}`)
+                tokenUsageMap.delete(address)
                 return;
             }
 
@@ -130,7 +126,9 @@ async function main() {
                 info.feeInfo.IsHoneypot === false &&
                 info.feeInfo.Error === null &&
                 info.feeInfo.BuyTax === 0 &&
-                info.feeInfo.SellTax === 0
+                info.feeInfo.SellTax === 0 &&
+                info.feeInfo.BuyGas < 160000 &&
+                info.feeInfo.SellGas < info.feeInfo.BuyGas
             )
         })
 
@@ -246,14 +244,10 @@ async function main() {
                 ]);
 
                 try {
-                    console.log(pairsInTx[i])
-
                     let [token0, token1] = await Promise.all([
                         multicallProvider.wrap(contract).token0(),
                         multicallProvider.wrap(contract).token1()
                     ])
-
-                    console.log(token0, token1)
 
                     if (token0 === transferLog.address || token1 === transferLog.address) {
                         let pairAddr = pairsInTx[i];

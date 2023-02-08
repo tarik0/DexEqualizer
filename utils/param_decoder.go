@@ -38,12 +38,12 @@ func PrintTradeOption(option *circle.TradeOption) {
 	logger.Log.Infoln("")
 
 	logger.Log.Infoln("Reserves")
-	for i, reserves := range option.Circle.PairReserves {
-		logger.Log.Infoln(fmt.Sprintf("[%d/%d] R0: %s, R1: %s", i, len(option.Circle.PairReserves), reserves[0].String(), reserves[1].String()))
+	for i, reserves := range option.Reserves {
+		logger.Log.Infoln(fmt.Sprintf("[%d/%d] R0: %s, R1: %s", i, len(option.Reserves), reserves[0].String(), reserves[1].String()))
 	}
 
 	// Validate amounts.
-	for i, reserves := range option.Circle.PairReserves {
+	for i, reserves := range option.Reserves {
 		var resIn = new(big.Int)
 		var resOut = new(big.Int)
 

@@ -19,7 +19,6 @@ type Circle struct {
 	PairFees      []*big.Int
 	PairTokens    [][]common.Address
 	PairAddresses []common.Address
-	PairReserves  [][]*big.Int
 
 	// Is valid ?
 	isValid bool
@@ -32,6 +31,7 @@ type TradeOption struct {
 
 	OptimalIn  *big.Int
 	AmountsOut []*big.Int
+	Reserves   [][]*big.Int
 
 	// Is valid ?
 	isValid bool
@@ -58,7 +58,6 @@ func NewCircle(
 	pairFees []*big.Int,
 	pairTokens [][]common.Address,
 	pairAddresses []common.Address,
-	pairReserves [][]*big.Int,
 ) (*Circle, error) {
 	// Validate the inputs.
 	isValid := len(path) == len(symbols)
@@ -66,7 +65,6 @@ func NewCircle(
 	isValid = len(pairs) == len(pairFees)
 	isValid = len(pairs) == len(pairTokens)
 	isValid = len(pairs) == len(pairAddresses)
-	isValid = len(pairs) == len(pairReserves)
 	if !isValid {
 		return nil, variables.InvalidInput
 	}
@@ -78,7 +76,6 @@ func NewCircle(
 		pairFees,
 		pairTokens,
 		pairAddresses,
-		pairReserves,
 		true,
 	}, nil
 }
@@ -88,6 +85,7 @@ func NewTradeOption(
 	c *Circle,
 	optimalIn *big.Int,
 	amountOut []*big.Int,
+	reserves [][]*big.Int,
 ) (*TradeOption, error) {
 	// Validate inputs.
 	isValid := c.isValid && optimalIn.Cmp(common.Big0) > 0
@@ -96,5 +94,5 @@ func NewTradeOption(
 		return nil, variables.InvalidInput
 	}
 
-	return &TradeOption{c, optimalIn, amountOut, true}, nil
+	return &TradeOption{c, optimalIn, amountOut, reserves, true}, nil
 }

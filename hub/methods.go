@@ -107,7 +107,7 @@ func (h *Hub) BroadcastMsg(msg string) error {
 
 	// Marshall.
 	messageReq := MessageReq{
-		Timestamp: time.Now().Unix(),
+		Timestamp: time.Now().UnixMilli(),
 		Message:   msg,
 	}
 

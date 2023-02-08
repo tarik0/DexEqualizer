@@ -117,7 +117,7 @@ func (t *TradeOption) NormalGasTokenAmount() uint64 {
 	return gasTokens
 }
 
-func (t *TradeOption) GetJSON() TradeOptionJSON {
+func (t *TradeOption) GetJSON(gasPrice *big.Int) TradeOptionJSON {
 	// Path.
 	var pathStr = make([]string, len(t.Circle.Path))
 	for i, val := range t.Circle.Path {
@@ -141,7 +141,7 @@ func (t *TradeOption) GetJSON() TradeOptionJSON {
 		Symbols:      t.Circle.Symbols,
 		Pairs:        pairsStr,
 		AmountsOut:   amountsStr,
-		TriggerLimit: t.GetTradeCost(variables.GasPrice),
+		TriggerLimit: t.GetTradeCost(gasPrice),
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	"github.com/tarik0/DexEqualizer/variables"
 	"golang.org/x/exp/maps"
 	"math/big"
-	"sync"
 )
 
 // Start
@@ -27,7 +26,6 @@ func (p *PairUpdater) Start() error {
 		logger.Log.WithError(err).Fatalln("Unable to get block number.")
 	}
 	p.highestBlockNum.Store(blockNum)
-	p.lastSyncBlockNum.Store(blockNum)
 
 	// Find factories.
 	err = p.findFactories()
@@ -35,11 +33,19 @@ func (p *PairUpdater) Start() error {
 		return err
 	}
 
+	logger.Log.
+		WithField("count", len(p.Factories)).
+		Debugln("Factory addresses found!")
+
 	// Find token decimals.
 	err = p.findDecimals()
 	if err != nil {
 		return err
 	}
+
+	logger.Log.
+		WithField("count", len(p.TokenToDecimals)).
+		Debugln("Token decimals found!")
 
 	// Find pair addresses.
 	err = p.findPairAddresses()
@@ -50,23 +56,29 @@ func (p *PairUpdater) Start() error {
 	// Map keys.
 	p.PairAddresses = maps.Keys(p.AddressToPair)
 
-	// Find pair reserves.
-	err = p.findReserves()
+	// Calculate the total pairs size.
+	factoriesSize := len(p.Factories)
+	pairsSize := ((len(p.params.Tokens.Addresses) - 1) * len(p.params.Tokens.Addresses)) / 2
+	totalPairsSize := factoriesSize * pairsSize
+
+	logger.Log.
+		WithField("count", len(p.PairAddresses)).
+		WithField("maxCount", totalPairsSize).
+		Debugln("Pair addresses found!")
+
+	// Get current block number.
+	blockNum, err = p.backend.BlockNumber(context.Background())
 	if err != nil {
-		return err
+		logger.Log.WithError(err).Fatalln("Unable to get block number.")
 	}
+	p.highestBlockNum.Store(blockNum)
+	p.syncBlockNum.Store(blockNum)
 
-	// Find pair circles.
-	err = p.findCircles()
-	if err != nil {
-		return err
-	}
+	// Listen actions.
+	go p.listenActions()
 
-	// History listener.
-	p.listenHistory()
-
-	// Sort circles.
-	p.sortCircles()
+	// Listen history.
+	go p.listenHistory()
 
 	// Subscribe to new blocks.
 	p.subscribeToHeads()
@@ -74,60 +86,77 @@ func (p *PairUpdater) Start() error {
 	// Subscribe to new pending transactions.
 	p.subscribeToPending()
 
-	// The filter logs mutex.
-	p.filterLogsMutex = sync.RWMutex{}
+	// Listen block.
+	go p.listenHeads()
 
-	// Start listening for new heads.
-	go func() {
-		var err error
-		for {
-			select {
-			case err = <-p.blocksSub.Err():
-				// Disconnected, retry.
-				close(p.blocksCh)
-				logger.Log.WithError(err).Errorln("Disconnected from the new blocks! Reconnecting...")
-				p.subscribeToHeads()
-				logger.Log.WithError(err).Errorln("Connected back to the new blocks!")
-			case header := <-p.blocksCh:
-				// Redirect to the listen method.
-				if header != nil {
-					// Update block number.
-					p.TxHistoryReset <- true
-					p.highestBlockNum.Store(header.Number.Uint64())
-					go p.listenBlocks(header)
-				}
-			}
-		}
-	}()
+	// Listen pending.
+	go p.listenPending()
 
-	// Sometimes the pending transactions can have same account and nonce
-	// so the most profitable one for the miner will get selected.
-	p.accountToPendingTx = sync.Map{}
+	// Find pair reserves.
+	firstSyncBlock, err := p.findReserves(new(big.Int).SetUint64(blockNum))
+	if err != nil {
+		return err
+	}
 
-	// Start listening for new transactions.
-	go func() {
-		// Skip if node not supported.
-		if p.pendingSub == nil || p.pendingCh == nil {
-			return
-		}
+	// Check sync block is the same as call block.
+	if firstSyncBlock.Uint64() != blockNum {
+		panic("first sync block is not right")
+	}
 
-		for {
-			select {
-			case err = <-p.pendingSub.Err():
-				// Disconnected, retry.
-				close(p.pendingCh)
-				logger.Log.WithError(err).Errorln("Disconnected from the new pending transactions! Reconnecting...")
-				p.subscribeToPending()
-				logger.Log.WithError(err).Errorln("Connected back to the new pending transactions!")
-			case hash := <-p.pendingCh:
-				if hash != nil {
-					go p.listenPending(hash)
-				}
-			}
-		}
-	}()
+	logger.Log.
+		WithField("syncBlock", blockNum).
+		Debugln("Got the initial reserves for all pairs.")
+
+	// Find pair circles.
+	err = p.findCircles()
+	if err != nil {
+		return err
+	}
 
 	return nil
+}
+
+// DoTrade
+//	Sends transaction to the trade channel.
+func (p *PairUpdater) DoTrade(action TradeAction) error {
+	if p.tradeCh == nil {
+		return variables.InvalidBlock
+	}
+
+	p.tradeCh <- action
+	return nil
+}
+
+// GetGasPriceForPairs
+//	Gets the min. gas price for the transaction to frontrun others.
+func (p *PairUpdater) GetGasPriceForPairs(addresses []common.Address) *big.Int {
+	// The default gas price.
+	maxGasPrice := new(big.Int).Set(variables.GasPrice)
+
+	// Lock the read mutex.
+	p.pairToMinGasPriceMutex.RLock()
+
+	// Iterate over pairs.
+	for _, pairAddr := range addresses {
+		// Get the pair gas price.
+		val, ok := p.pairToMinGasPrice[pairAddr]
+
+		// Compare the gas prices.
+		if ok && val.Cmp(val) > 0 {
+			maxGasPrice.Set(val)
+		}
+	}
+
+	// Unlock the read mutex.
+	p.pairToMinGasPriceMutex.RUnlock()
+
+	// Increase %10 percent if it's not default.
+	if maxGasPrice.Cmp(variables.GasPrice) != 0 {
+		maxGasPrice.Mul(maxGasPrice, big.NewInt(10))
+		maxGasPrice.Div(maxGasPrice, big.NewInt(100))
+	}
+
+	return maxGasPrice
 }
 
 // GetPairFee
@@ -166,17 +195,6 @@ func (p *PairUpdater) GetTokenFee(addr common.Address) (*big.Int, error) {
 	return new(big.Int).Set(inFee), nil
 }
 
-// GetLastSyncBlockNumber
-//	Returns the latest block number.
-func (p *PairUpdater) GetLastSyncBlockNumber() uint64 {
-	val := p.lastSyncBlockNum.Load()
-	if val == nil {
-		return uint64(0)
-	}
-
-	return val.(uint64)
-}
-
 // GetHighestBlockNumber
 //	Returns the highest block number.
 func (p *PairUpdater) GetHighestBlockNumber() uint64 {
@@ -188,17 +206,36 @@ func (p *PairUpdater) GetHighestBlockNumber() uint64 {
 	return val.(uint64)
 }
 
+// GetSyncBlockNumber
+//	Returns the last sync block number.
+func (p *PairUpdater) GetSyncBlockNumber() uint64 {
+	val := p.syncBlockNum.Load()
+	if val == nil {
+		return uint64(0)
+	}
+
+	return val.(uint64)
+}
+
 // GetOptimalIn calculates the optimal input amount for maximum profit.
-func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bestAmountOut []*big.Int, err error) {
+func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (
+	bestAmountIn *big.Int,
+	bestAmountOut []*big.Int,
+	reserves [][]*big.Int,
+	err error,
+) {
 	// Check if it's a circle.
 	if c.Path[0] != c.Path[len(c.Path)-1] {
-		return nil, nil, variables.InvalidInput
+		return nil, nil, nil, variables.InvalidInput
 	}
 
 	// Check route count.
 	if len(c.Pairs) < 2 {
-		return nil, nil, variables.InvalidInput
+		return nil, nil, nil, variables.InvalidInput
 	}
+
+	// The reserves.
+	reserves = make([][]*big.Int, len(c.PairAddresses))
 
 	// The calculation variables.
 	a := new(big.Int).Set(common.Big0)
@@ -211,20 +248,20 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 		// Get pair fee.
 		pairFee, err := p.GetPairFee(pairAddr)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		// Get token fees.
 		inFee, err := p.GetTokenFee(c.Path[pairId])
 		outFee, err := p.GetTokenFee(c.Path[pairId+1])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		// Sort reserves.
 		resIn, resOut, err := p.AddressToPair[pairAddr].GetSortedReserves(c.Path[pairId])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		// Calculate A.
@@ -271,7 +308,7 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 			// Sort previous reserves.
 			_, prevResOut, err = p.AddressToPair[c.PairAddresses[pairId-1]].GetSortedReserves(c.Path[pairId-1])
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 
@@ -283,13 +320,13 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 			// Get the first token's fee.
 			firstTokenFee, err := p.GetTokenFee(c.Path[0])
 			if err != nil {
-				return nil, nil, variables.InvalidInput
+				return nil, nil, nil, err
 			}
 
 			// Get the first pool's fee.
 			firstPoolFee, err := p.GetPairFee(c.PairAddresses[0])
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 
 			// _d = pairTokenFees[0][0] * pairFees[0] * inFee ** 2 * pairFee * previousOutReserve
@@ -303,6 +340,10 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 			d.Mul(d, pairFee)
 			d.Mul(d, prevResOut)
 		}
+
+		// Append reserves.
+		reserves[pairId] = make([]*big.Int, 2)
+		copy(reserves[pairId], p.AddressToPair[pairAddr].GetReserves())
 	}
 
 	// Sqrt(a)
@@ -321,7 +362,7 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 
 	// No arbitrage if one of them are zero.
 	if rootOne.Cmp(common.Big0) <= 0 && rootTwo.Cmp(common.Big0) <= 0 {
-		return nil, nil, variables.NoArbitrage
+		return nil, nil, nil, variables.NoArbitrage
 	}
 
 	// Max input.
@@ -369,7 +410,7 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (bestAmountIn *big.Int, bes
 		}
 	}
 
-	return bestAmountIn, bestAmountOut, err
+	return bestAmountIn, bestAmountOut, reserves, err
 }
 
 // GetAmountsOut calculates amounts out.

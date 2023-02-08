@@ -29,7 +29,7 @@ func GetAmountOut(
 	amountOut := big.NewInt(0).Div(num, den)
 
 	if amountOut.Cmp(common.Big0) <= 0 {
-		amountOut = common.Big0
+		amountOut = new(big.Int).Set(common.Big0)
 	}
 
 	return amountIn, amountOut, nil
@@ -64,7 +64,7 @@ func GetAmountIn(
 
 	// Check if amount in is below zero.
 	if amountIn.Cmp(common.Big0) <= 0 {
-		amountIn = common.Big0
+		amountIn = new(big.Int).Set(common.Big0)
 	}
 
 	return amountIn, amountOut, nil

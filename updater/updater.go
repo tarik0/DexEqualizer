@@ -16,9 +16,7 @@ import (
 
 // Config variables.
 
-var MaxProcessAmount = 10000
-
-type OnSortCallback func(*types.Header, []*circle.TradeOption, time.Duration, *PairUpdater)
+type OnSortCallback func(*big.Int, []*circle.TradeOption, []*big.Int, time.Duration, *PairUpdater)
 
 // PairUpdater
 //	A system that checks pair reserves for arbitrage options.
@@ -47,43 +45,48 @@ type PairUpdater struct {
 	// The callbacks.
 	OnSort OnSortCallback
 
+	// Action channels.
+	tradeCh chan TradeAction
+	syncCh  chan SyncAction
+	sortCh  chan SortAction
+
 	// Channels.
 	blocksCh  chan *types.Header
 	pendingCh chan *common.Hash
+	logsCh    chan types.Log
 
 	// History channels.
-	TxHistoryReset chan bool
-	TxHistoryAdd   chan struct {
-		Tx          *types.Transaction
-		Option      *circle.TradeOption
-		BlockNumber *big.Int
-	}
-	TxHistorySearch chan struct {
-		TargetTx       *types.Transaction
-		TargetPairAddr common.Address
-	}
+	txHistoryReset  chan bool
+	txHistoryAdd    chan HistoryAddAction
+	txHistorySearch chan HistorySearchAction
 
 	// Subscriptions
 	pendingSub ethereum.Subscription
 	blocksSub  ethereum.Subscription
+	logsSub    ethereum.Subscription
 
 	// Our transaction history.
 	hashToOptionHistory map[common.Hash]*circle.TradeOption
 	hashToTxHistory     map[common.Hash]*types.Transaction
 	hashToTxBlock       map[common.Hash]*big.Int
 
+	// Pair to minimum gas required to frontrun others.
+	pairToMinGasPriceMutex sync.RWMutex
+	pairToMinGasPrice      map[common.Address]*big.Int
+
 	// Pending history.
 	accountToPendingTx sync.Map
 
 	// Atomic variables.
-	highestBlockNum  atomic.Value
-	lastSyncBlockNum atomic.Value
-	filterLogsMutex  sync.RWMutex
+	syncBlockNum    atomic.Value
+	highestBlockNum atomic.Value
 
 	// Other variables.
 	params     *PairUpdaterParams
 	backend    *ethclient.Client
 	rpcBackend *rpc.Client
+
+	pendingBackend *rpc.Client
 }
 
 // PairUpdaterParams
@@ -113,12 +116,11 @@ type PairUpdaterParams struct {
 // DFSCircleParams
 //	Helper struct to make recursive things easier.
 type DFSCircleParams struct {
-	Path          []common.Address
-	Symbols       []string
-	Route         []common.Address
-	RouteFees     []*big.Int
-	RouteTokens   [][]common.Address
-	RouteReserves [][]*big.Int
+	Path        []common.Address
+	Symbols     []string
+	Route       []common.Address
+	RouteFees   []*big.Int
+	RouteTokens [][]common.Address
 }
 
 // DebugTraceCall
@@ -135,12 +137,54 @@ type DebugTraceCall struct {
 	Value   string           `json:"value"`
 }
 
+// TradeAction
+//	Trade action order.
+type TradeAction struct {
+	BlockNumber         *big.Int
+	Transaction         *types.Transaction
+	TradeOption         *circle.TradeOption
+	ReplacedTransaction *types.Transaction
+}
+
+// SyncAction
+//	Update reserve order.
+type SyncAction struct {
+	BlockNumber *big.Int
+	TxIndex     *big.Int
+	LogIndex    *big.Int
+	Address     common.Address
+	Res0        *big.Int
+	Res1        *big.Int
+}
+
+// SortAction
+//	Sort circles order.
+type SortAction struct {
+	BlockNumber *big.Int
+}
+
+// HistoryAddAction
+//	Add pending transaction to history order.
+type HistoryAddAction struct {
+	Tx          *types.Transaction
+	Option      *circle.TradeOption
+	BlockNumber *big.Int
+}
+
+// HistorySearchAction
+//	Search transaction in the history order.
+type HistorySearchAction struct {
+	TargetTx       *types.Transaction
+	TargetPairAddr common.Address
+}
+
 // NewPairUpdater
 //	Generates a new pair updater.
-func NewPairUpdater(params *PairUpdaterParams, backend *ethclient.Client, rpcBackend *rpc.Client) *PairUpdater {
+func NewPairUpdater(params *PairUpdaterParams, backend *ethclient.Client, rpcBackend *rpc.Client, pendingBackend *rpc.Client) *PairUpdater {
 	return &PairUpdater{
-		params:     params,
-		backend:    backend,
-		rpcBackend: rpcBackend,
+		params:         params,
+		backend:        backend,
+		rpcBackend:     rpcBackend,
+		pendingBackend: pendingBackend,
 	}
 }

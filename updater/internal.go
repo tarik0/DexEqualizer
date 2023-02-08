@@ -8,7 +8,9 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/psilva261/timsort/v2"
 	"github.com/sirupsen/logrus"
 	"github.com/tarik0/DexEqualizer/abis"
@@ -22,7 +24,6 @@ import (
 	"math/big"
 	"strings"
 	"sync"
-	"time"
 )
 
 // The abis.
@@ -68,8 +69,7 @@ func (p *PairUpdater) findFactories() error {
 	}
 
 	// Multi call factories.
-	callBlockNum := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
-	_, returnBytes, err := p.multiCall(abiList, contractAddresses, functionNames, functionArgs, callBlockNum)
+	_, returnBytes, err := p.multiCallBatch(abiList, contractAddresses, functionNames, functionArgs, new(big.Int).Set(common.Big0))
 	if err != nil {
 		return err
 	}
@@ -144,138 +144,56 @@ func (p *PairUpdater) findPairAddresses() error {
 		abiList[i] = factoryAbi
 	}
 
-	// Split into chunks if too many.
-	chunkSize := 300
-	var contractAddressesChunks [][]common.Address = chunkBy(contractAddresses, chunkSize)
-	var functionNamesChunks [][]string = chunkBy(functionNames, chunkSize)
-	var functionArgsChunks [][][]interface{} = chunkBy(functionArgs, chunkSize)
-
-	// Check chunk number.
-	if len(contractAddressesChunks) > MaxProcessAmount-1 {
-		return variables.TooManyPairs
-	}
-
-	// Wait group.
-	var wg sync.WaitGroup
-
-	// The response channel.
-	var resChan = make(chan *struct {
-		Factories     []common.Address
-		PairAddresses []common.Address
-		PairTokens    [][]common.Address
-		Err           error
-	})
-
-	// Start workers.
-	for chunkId := 0; chunkId < len(contractAddressesChunks); chunkId++ {
-		// The chunks.
-		contractAddressesChunk := contractAddressesChunks[chunkId]
-		functionNamesChunk := functionNamesChunks[chunkId]
-		functionArgsChunk := functionArgsChunks[chunkId]
-
-		// Add one to the group.
-		wg.Add(1)
-
-		// Start routine.
-		callBlockNum := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
-		go func(addresses []common.Address, funcNames []string, funcArgs [][]interface{}) {
-			defer wg.Done()
-
-			// Multi call factories..
-			_, returnBytes, err := p.multiCall(abiList, addresses, funcNames, funcArgs, callBlockNum)
-			if err != nil {
-				resChan <- &struct {
-					Factories     []common.Address
-					PairAddresses []common.Address
-					PairTokens    [][]common.Address
-					Err           error
-				}{nil, nil, nil, err}
-				return
-			}
-
-			// Check errors.
-			if len(returnBytes[0]) == 0 {
-				resChan <- &struct {
-					Factories     []common.Address
-					PairAddresses []common.Address
-					PairTokens    [][]common.Address
-					Err           error
-				}{nil, nil, nil, variables.EmptyResponse}
-				return
-			}
-
-			// The response variables.
-			factories := make([]common.Address, 0)
-			pairAddresses := make([]common.Address, 0)
-			_pairTokens := make([][]common.Address, 0)
-
-			// Decode pairs.
-			for k, addrBytes := range returnBytes {
-				// Decode.
-				pairAddr := common.BytesToAddress(addrBytes)
-				tokenA := (funcArgs[k][0]).(common.Address)
-				tokenB := (funcArgs[k][1]).(common.Address)
-				factory := addresses[k]
-
-				factories = append(factories, factory)
-				pairAddresses = append(pairAddresses, pairAddr)
-				_pairTokens = append(_pairTokens, dexpair.SortTokens(tokenA, tokenB))
-			}
-
-			resChan <- &struct {
-				Factories     []common.Address
-				PairAddresses []common.Address
-				PairTokens    [][]common.Address
-				Err           error
-			}{factories, pairAddresses, _pairTokens, nil}
-		}(contractAddressesChunk, functionNamesChunk, functionArgsChunk)
-	}
-
-	// Wait.
-	go func() {
-		wg.Wait()
-		close(resChan)
-	}()
-
+	// Set arrays and maps.
 	p.TokenToPairs = make(map[common.Address][]*dexpair.DexPair)
 	p.AddressToPair = make(map[common.Address]*dexpair.DexPair)
 	p.PairToTokens = make(map[common.Address][]common.Address)
 	p.PairToFactory = make(map[common.Address]common.Address)
 	p.Pairs = make([]*dexpair.DexPair, 0)
 
-	// Collect results.
-	for r := range resChan {
-		if r.Err != nil {
-			return r.Err
+	// Batch multicall.
+	_, callResponses, err := p.multiCallBatch(abiList, contractAddresses, functionNames, functionArgs, new(big.Int).Set(common.Big0))
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to find pair addresses.")
+	}
+
+	// Check response length.
+	if len(callResponses) != totalPairsSize {
+		panic("missing multicall response")
+	}
+
+	// Iterate over response.
+	for i, returnBytes := range callResponses {
+		// Decode pair address.
+		pairAddr := common.BytesToAddress(returnBytes)
+
+		// Skip dead address.
+		if strings.EqualFold(pairAddr.String(), "0x0000000000000000000000000000000000000000") ||
+			strings.EqualFold(pairAddr.String(), "0x000000000000000000000000000000000000dEaD") {
+			continue
 		}
 
-		// Iterate over pairs.
-		for i, pairAddr := range r.PairAddresses {
-			// Skip empty.
-			if pairAddr.String() == "0x0000000000000000000000000000000000000000" {
-				continue
-			}
+		// The other arguments.
+		tokenA := (functionArgs[i][0]).(common.Address)
+		tokenB := (functionArgs[i][1]).(common.Address)
+		factory := contractAddresses[i]
 
-			// Get tokens.
-			tokenA, tokenB := r.PairTokens[i][0], r.PairTokens[i][1]
-
-			// Create array if not found.
-			if val, ok := p.TokenToPairs[tokenA]; !ok || val == nil {
-				p.TokenToPairs[tokenA] = make([]*dexpair.DexPair, 0)
-			}
-			if val, ok := p.TokenToPairs[tokenB]; !ok || val == nil {
-				p.TokenToPairs[tokenB] = make([]*dexpair.DexPair, 0)
-			}
-
-			// Append to map.
-			tmpPair := dexpair.NewDexPair(pairAddr, tokenA, tokenB)
-			p.TokenToPairs[tokenA] = append(p.TokenToPairs[tokenA], tmpPair)
-			p.TokenToPairs[tokenB] = append(p.TokenToPairs[tokenB], tmpPair)
-			p.AddressToPair[pairAddr] = tmpPair
-			p.PairToTokens[pairAddr] = r.PairTokens[i]
-			p.PairToFactory[pairAddr] = r.Factories[i]
-			p.Pairs = append(p.Pairs, tmpPair)
+		// Create array if not found.
+		if val, ok := p.TokenToPairs[tokenA]; !ok || val == nil {
+			p.TokenToPairs[tokenA] = make([]*dexpair.DexPair, 0)
 		}
+		if val, ok := p.TokenToPairs[tokenB]; !ok || val == nil {
+			p.TokenToPairs[tokenB] = make([]*dexpair.DexPair, 0)
+		}
+
+		// Append to map.
+		tmpPair := dexpair.NewDexPair(pairAddr, tokenA, tokenB)
+		p.TokenToPairs[tokenA] = append(p.TokenToPairs[tokenA], tmpPair)
+		p.TokenToPairs[tokenB] = append(p.TokenToPairs[tokenB], tmpPair)
+		p.AddressToPair[pairAddr] = tmpPair
+		p.PairToTokens[pairAddr] = dexpair.SortTokens(tokenA, tokenB)
+		p.PairToFactory[pairAddr] = factory
+		p.Pairs = append(p.Pairs, tmpPair)
 	}
 
 	return nil
@@ -283,16 +201,10 @@ func (p *PairUpdater) findPairAddresses() error {
 
 // findReserves
 //	Finds the pair reserves from the pairs.
-func (p *PairUpdater) findReserves() error {
+func (p *PairUpdater) findReserves(blockNum *big.Int) (*big.Int, error) {
 	// Skip if no pair.
 	if len(p.Pairs) == 0 {
-		return variables.NoPairFound
-	}
-
-	// Address slice.
-	var contractAddresses = make([]common.Address, len(p.Pairs))
-	for i, _pair := range p.Pairs {
-		contractAddresses[i] = _pair.Address()
+		return nil, variables.NoPairFound
 	}
 
 	// Function name slice.
@@ -313,115 +225,47 @@ func (p *PairUpdater) findReserves() error {
 		abiList[i] = pairAbi
 	}
 
-	// Split into chunks if too many.
-	chunkSize := 300
-	var contractAddressesChunks [][]common.Address = chunkBy(contractAddresses, chunkSize)
-	var functionNamesChunks [][]string = chunkBy(functionNames, chunkSize)
-	var functionArgsChunks [][][]interface{} = chunkBy(functionArgs, chunkSize)
-
-	// Check chunk number.
-	if len(contractAddressesChunks) > MaxProcessAmount-1 {
-		return variables.TooManyPairs
+	// Batch multicall.
+	resBlockNum, callResponses, err := p.multiCallBatch(abiList, p.PairAddresses, functionNames, functionArgs, blockNum)
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to find pair reserves.")
 	}
 
-	// Wait group.
-	var wg sync.WaitGroup
+	// Iterate over response.
+	for i, returnBytes := range callResponses {
+		pairAddr := p.PairAddresses[i]
 
-	// The response channel.
-	var resChan = make(chan *struct {
-		Reserves  [][]*big.Int
-		Addresses []common.Address
-		Err       error
-	})
-
-	// Get current block number.
-	callBlockNum := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
-
-	// Start workers.
-	for chunkId := 0; chunkId < len(contractAddressesChunks); chunkId++ {
-		// The chunks.
-		contractAddressesChunk := contractAddressesChunks[chunkId]
-		functionNamesChunk := functionNamesChunks[chunkId]
-		functionArgsChunk := functionArgsChunks[chunkId]
-
-		// Add one to the group.
-		wg.Add(1)
-
-		// Start routine.
-		go func() {
-			defer wg.Done()
-
-			// Multi call factories.
-			_, returnBytes, err := p.multiCall(abiList, contractAddressesChunk, functionNamesChunk, functionArgsChunk, callBlockNum)
-			if err != nil {
-				resChan <- &struct {
-					Reserves  [][]*big.Int
-					Addresses []common.Address
-					Err       error
-				}{nil, nil, err}
-				return
-			}
-
-			// Check errors.
-			if len(returnBytes[0]) == 0 {
-				resChan <- &struct {
-					Reserves  [][]*big.Int
-					Addresses []common.Address
-					Err       error
-				}{nil, nil, variables.EmptyResponse}
-				return
-			}
-
-			// Decode pairs.
-			var pairReserves = make([][]*big.Int, len(returnBytes))
-			var pairAddrs = make([]common.Address, len(returnBytes))
-			for k, addrBytes := range returnBytes {
-				// Check if empty.
-
-				for _, v := range addrBytes {
-					if v != 0 && contractAddressesChunk[k].String() != "0x0000000000000000000000000000000000000000" {
-						pairAddrs[k] = contractAddressesChunk[k]
-						pairReserves[k] = make([]*big.Int, 2)
-						pairReserves[k][0] = new(big.Int).SetBytes(addrBytes[0:32])
-						pairReserves[k][1] = new(big.Int).SetBytes(addrBytes[32:64])
-
-						// atomic.AddInt32(&shit, 1)
-						// logger.Log.Infoln(fmt.Sprintf("[%d/%d] %s | %s, %s", atomic.LoadInt32(&shit), len(p.Pairs), pairAddrs[k].String(), pairReserves[k][0].String(), pairReserves[k][1].String()))
-						break
-					}
-				}
-			}
-
-			resChan <- &struct {
-				Reserves  [][]*big.Int
-				Addresses []common.Address
-				Err       error
-			}{pairReserves, pairAddrs, nil}
-		}()
-	}
-
-	// Wait.
-	go func() {
-		wg.Wait()
-		close(resChan)
-	}()
-
-	// Collect results.
-	for r := range resChan {
-		if r.Err != nil {
-			return r.Err
+		// Continue if empty.
+		if len(returnBytes) != 96 {
+			logger.Log.
+				WithField("returnBytesLen", len(returnBytes)).
+				WithField("pair", pairAddr.String()).
+				Errorln("getReserve response is not right for this pair.")
+			continue
 		}
-		for i, addr := range r.Addresses {
-			if len(r.Reserves[i]) != 2 || r.Addresses[i].String() == "0x0000000000000000000000000000000000000000" {
-				continue
-			}
-			p.AddressToPair[addr].SetReserves(r.Reserves[i][0], r.Reserves[i][1], callBlockNum)
+
+		// Decode reserves.
+		reserve0 := new(big.Int).SetBytes(returnBytes[0:32])
+		reserve1 := new(big.Int).SetBytes(returnBytes[32:64])
+
+		// Check reserves.
+		if (reserve0.Cmp(common.Big0) == 0 && reserve1.Cmp(common.Big0) != 0) ||
+			(reserve1.Cmp(common.Big0) == 0 && reserve0.Cmp(common.Big0) != 0) {
+			panic("invalid reserves")
+		}
+
+		// Send to channel.
+		p.syncCh <- SyncAction{
+			Address:     pairAddr,
+			Res0:        reserve0,
+			Res1:        reserve1,
+			BlockNumber: resBlockNum,
+			TxIndex:     abi.MaxUint256,
+			LogIndex:    abi.MaxUint256,
 		}
 	}
 
-	logger.Log.WithField("blockNum", callBlockNum).Debugln("Pool reserves are found!")
-
-	return nil
+	return resBlockNum, nil
 }
 
 // findDecimals
@@ -452,8 +296,7 @@ func (p *PairUpdater) findDecimals() error {
 	}
 
 	// Multi call factories.
-	callBlockNum := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
-	_, returnBytes, err := p.multiCall(abiList, contractAddresses, functionNames, functionArgs, callBlockNum)
+	_, returnBytes, err := p.multiCallBatch(abiList, contractAddresses, functionNames, functionArgs, new(big.Int).Set(common.Big0))
 	if err != nil {
 		return err
 	}
@@ -494,12 +337,11 @@ func (p *PairUpdater) findCircles() error {
 	pathSymbols[0] = tempInSymbol
 
 	dfsParams := DFSCircleParams{
-		Path:          path,
-		Symbols:       pathSymbols,
-		Route:         make([]common.Address, 0),
-		RouteFees:     make([]*big.Int, 0),
-		RouteTokens:   make([][]common.Address, 0),
-		RouteReserves: make([][]*big.Int, 0),
+		Path:        path,
+		Symbols:     pathSymbols,
+		Route:       make([]common.Address, 0),
+		RouteFees:   make([]*big.Int, 0),
+		RouteTokens: make([][]common.Address, 0),
 	}
 
 	// The results and the wait group.
@@ -533,13 +375,6 @@ func (p *PairUpdater) findCircles() error {
 	return nil
 }
 
-// sortCircles
-//	Sorts DFS circles.
-func (p *PairUpdater) sortCircles() []*circle.TradeOption {
-	sortedTrades := p.quickSortCircles()
-	return sortedTrades
-}
-
 // subscribeToHeads
 //	Subscribes to the new blocks.
 func (p *PairUpdater) subscribeToHeads() {
@@ -554,11 +389,28 @@ func (p *PairUpdater) subscribeToHeads() {
 	}
 }
 
+// subscribeToLogs
+//	Subscribes to new logs.
+func (p *PairUpdater) subscribeToLogs(fromBlock uint64) {
+	// Make new channel.
+	p.logsCh = make(chan types.Log)
+
+	// Subscribe to the new blocks.
+	var err error
+	p.logsSub, err = variables.EthClient.SubscribeFilterLogs(context.Background(), ethereum.FilterQuery{
+		FromBlock: new(big.Int).SetUint64(fromBlock - 1),
+		Addresses: p.PairAddresses,
+	}, p.logsCh)
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to subscribe to the new blocks.")
+	}
+}
+
 // subscribeToPending
 //	Subscribes to the new pending transactions.
 func (p *PairUpdater) subscribeToPending() {
 	// Test if `debug_traceCall` is supported.
-	supportedModules, err := p.rpcBackend.SupportedModules()
+	supportedModules, err := p.pendingBackend.SupportedModules()
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to check supported modules.")
 		return
@@ -578,447 +430,41 @@ func (p *PairUpdater) subscribeToPending() {
 	}
 }
 
-// listenBlocks
-//	Listens new blocks.
-func (p *PairUpdater) listenBlocks(header *types.Header) {
-	// Total time to update a block.
-	start := time.Now()
+// compareAndSwapGasPrice
+//	Compares the previous min. gas price for the pair.
+func (p *PairUpdater) compareAndSwapGasPrice(pairAddr common.Address, tx *types.Transaction) {
+	// Lock the gas price mutex.
+	p.pairToMinGasPriceMutex.Lock()
 
-	// Get the latest block.
-	lastSyncBlockNum := p.GetLastSyncBlockNumber()
+	// Update the min. gas price for the pair.
+	minGasPrice, ok := p.pairToMinGasPrice[pairAddr]
 
-	// From block.
-	fromBlock := new(big.Int).Set(header.Number)
-	if header.Number.Uint64() != lastSyncBlockNum {
-		fromBlock.SetUint64(lastSyncBlockNum)
+	// The log fields.
+	logField := logrus.Fields{
+		"pair": pairAddr,
 	}
 
-	// Get the previous block logs.
-	prevLogs, err := p.backend.FilterLogs(context.Background(), ethereum.FilterQuery{
-		Addresses: p.PairAddresses,
-		FromBlock: fromBlock,
-		ToBlock:   header.Number,
-	})
-	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to get previous logs.")
+	// Check if pair already has a record.
+	if ok && tx.GasPrice().Cmp(minGasPrice) > 0 {
+		// Compare the gas price.
+		logField["oldGasPrice"] = fmt.Sprintf("%.2f Gwei", utils.WeiToGwei(minGasPrice))
+		logField["newGasPrice"] = fmt.Sprintf("%.2f Gwei", utils.WeiToGwei(tx.GasPrice()))
+		p.pairToMinGasPrice[pairAddr] = tx.GasPrice()
+		logger.Log.WithFields(logField).Debugln("Updated gas requirement for the pair.")
+	} else if !ok {
+		// Set the min gas price.
+		p.pairToMinGasPrice[pairAddr] = tx.GasPrice()
+		logField["newGasPrice"] = fmt.Sprintf("%.2f Gwei", utils.WeiToGwei(tx.GasPrice()))
+		logger.Log.WithFields(logField).Debugln("Updated gas requirement for the pair.")
 	}
 
-	// Update reserves.
-	p.filterLogsMutex.Lock()
-	for _, log := range prevLogs {
-		// Continue if not in addresses.
-		if _, ok := p.AddressToPair[log.Address]; !ok {
-			continue
-		}
-
-		// Iterate over topics.
-		for _, topic := range log.Topics {
-			// Continue if topic is not sync.
-			if !bytes.EqualFold(syncId.Bytes(), topic.Bytes()) {
-				continue
-			}
-
-			// Decode event.
-			syncDetails, err := pairAbi.Unpack("Sync", log.Data)
-			if err != nil {
-				logger.Log.WithError(err).Fatalln("Unable to decode 'sync' events.")
-				break
-			}
-
-			// Update reserves.
-			resA, resB := syncDetails[0].(*big.Int), syncDetails[1].(*big.Int)
-			p.AddressToPair[log.Address].SetReserves(resA, resB, new(big.Int).SetUint64(log.BlockNumber))
-			break
-		}
-	}
-	p.lastSyncBlockNum.Swap(header.Number.Uint64())
-	p.filterLogsMutex.Unlock()
-
-	updateTime := time.Since(start)
-	logger.Log.
-		WithField("updateTime", updateTime).
-		WithField("fromBlock", fromBlock).
-		WithField("toBlock", header.Number).
-		Debugln("Synced with the block.")
-
-	// Sort the circles.
-	sortStart := time.Now()
-	sortedTradeOptions := p.sortCircles()
-	sortTime := time.Since(sortStart)
-
-	// Trigger sort listener.
-	p.listenSort(sortedTradeOptions, header, updateTime, sortTime)
-}
-
-// listenSort
-//	Listens new block updates.
-func (p *PairUpdater) listenSort(options []*circle.TradeOption, header *types.Header, updateTime time.Duration, sortTime time.Duration) {
-	// Check if block has already passed.
-	highestBlockNum := p.GetHighestBlockNumber()
-	if highestBlockNum > header.Number.Uint64() || updateTime+sortTime > 2*time.Second {
-		logger.Log.
-			WithField("updateTime", updateTime).
-			WithField("blockNum", header.Number.Uint64()).
-			WithField("latestBlockNum", highestBlockNum).
-			Debugln("Block latency is too much! Skipping this block...")
-		return
-	}
-
-	// Skip if no trades.
-	if len(options) == 0 {
-		return
-	}
-
-	// Limit options to best 5.
-	if len(options) > 5 {
-		options = options[:5]
-	}
-
-	// Trigger event.
-	if p.OnSort != nil && len(options) > 0 {
-		p.OnSort(header, options, sortTime+updateTime, p)
-	}
-}
-
-// listenPending gets triggered on a new pending transaction.
-func (p *PairUpdater) listenPending(hash *common.Hash) {
-	// Skip if no hash.
-	if hash == nil {
-		return
-	}
-
-	// Get transaction details.
-	transaction, isPending, err := variables.EthClient.TransactionByHash(context.Background(), *hash)
-	if err != nil || transaction == nil || isPending != false {
-		return
-	}
-
-	// Get from.
-	msg, err := transaction.AsMessage(types.LatestSignerForChainID(variables.ChainId), big.NewInt(1))
-	if err != nil {
-		return
-	}
-
-	// Skip our transactions.
-	if bytes.EqualFold(msg.From().Bytes(), variables.Wallet.Address().Bytes()) {
-		return
-	}
-
-	// Check account nonce.
-	val, ok := p.accountToPendingTx.Load(msg.From())
-
-	// Check if there are already a pending transaction for that account.
-	if ok {
-		// Previous account transaction.
-		prevAccountTx := val.(*types.Transaction)
-
-		// Check nonce's.
-		if transaction.Nonce() == prevAccountTx.Nonce() {
-			// Check gas prices.
-			if transaction.GasPrice().Cmp(prevAccountTx.GasPrice()) > 0 {
-				// New transaction has same nonce but more gas.
-				// Replace the transaction.
-				p.accountToPendingTx.Store(msg.From(), transaction)
-			} else {
-				// New transaction has same nonce but less or same gas.
-				// Skip.
-				return
-			}
-		} else if transaction.Nonce() > prevAccountTx.Nonce() {
-			// Replace the transaction.
-			p.accountToPendingTx.Store(msg.From(), transaction)
-		} else {
-			// Skip if nonce is less.
-			return
-		}
-	} else {
-		// Add it to the transactions.
-		p.accountToPendingTx.Store(msg.From(), transaction)
-	}
-
-	// Filter out transactions.
-	if transaction.To() == nil || transaction.Data() == nil {
-		return
-	}
-	if len(transaction.Data()) < 4 {
-		return
-	}
-	if transaction.To().String() == "0x0000000000000000000000000000000000000000" ||
-		transaction.To().String() == "0x000000000000000000000000000000000000dEaD" {
-		return
-	}
-	if transaction.GasPrice().Cmp(variables.GasPrice) < 0 || transaction.Gas() < 70000 {
-		return
-	}
-
-	// Static search.
-	if !p.staticSearch(transaction) {
-		// Dynamic search.
-		p.dynamicSearch(msg, transaction)
-	}
-}
-
-// staticSearch
-//	Searches the transaction data and check if any of our pairs are used.
-func (p *PairUpdater) staticSearch(transaction *types.Transaction) bool {
-	// Limit call data to 100 + 4 bytes
-	callData := transaction.Data()
-	if len(callData) > 104 {
-		callData = callData[4:100]
-	}
-
-	// Iterate over pairs.
-	isFound := false
-	for _, pairAddr := range p.PairAddresses {
-		// Trigger search if pair address is in the transaction data.
-		if bytes.Contains(callData, pairAddr.Bytes()) {
-			isFound = true
-			p.TxHistorySearch <- struct {
-				TargetTx       *types.Transaction
-				TargetPairAddr common.Address
-			}{
-				TargetTx:       transaction,
-				TargetPairAddr: pairAddr,
-			}
-		}
-	}
-
-	return isFound
-}
-
-// dynamicSearch
-// 	Simulates a transaction with `debug_traceCall` and checks if any of our pairs are used.
-func (p *PairUpdater) dynamicSearch(msg types.Message, transaction *types.Transaction) {
-	// Marshall tx.
-	simulationTx := make(map[string]string)
-	simulationTx["from"] = msg.From().String()
-	simulationTx["to"] = transaction.To().String()
-	simulationTx["gas"] = fmt.Sprintf("0x%x", transaction.Gas())
-	simulationTx["gasPrice"] = fmt.Sprintf("0x%x", transaction.GasPrice())
-	simulationTx["value"] = fmt.Sprintf("0x%x", transaction.Value())
-	simulationTx["data"] = "0x" + hex.EncodeToString(transaction.Data())
-	simulationTx["nonce"] = fmt.Sprintf("0x%x", transaction.Nonce())
-
-	// Tracer options.
-	tracerOptions := make(map[string]interface{})
-	tracerOptions["onlyTopCall"] = "false"
-	tracerOptions["withLog"] = "true"
-
-	// Options.
-	options := make(map[string]interface{})
-	options["disableStorage"] = true
-	options["disableStack"] = false
-	options["enableMemory"] = false
-	options["timeout"] = "75ms"
-	options["tracer"] = "callTracer"
-	options["tracerConfig"] = tracerOptions
-
-	// Trace as call.
-	var traceCallRes DebugTraceCall
-	err := p.rpcBackend.Call(&traceCallRes, "debug_traceCall", simulationTx, "latest", options)
-	if err != nil {
-		logger.Log.
-			WithError(err).
-			WithField("hash", transaction.Hash().String()).
-			Debugln("Unable to simulate transaction.")
-		return
-	}
-
-	// Pair addresses channel.
-	var wg sync.WaitGroup
-	var pairAddrsCh chan common.Address
-
-	// Recursive checker function.
-	var checkCall func(DebugTraceCall)
-	checkCall = func(call DebugTraceCall) {
-		defer wg.Done()
-		if slices.Contains(p.PairAddresses, call.To) {
-			pairAddrsCh <- call.To
-		}
-
-		// Check sub calls.
-		if call.Calls != nil && len(call.Calls) > 0 {
-			for _, subCall := range call.Calls {
-				wg.Add(1)
-				go checkCall(subCall)
-			}
-		}
-	}
-
-	// Wait checker.
-	wg.Add(1)
-	go checkCall(traceCallRes)
-	wg.Wait()
-
-	// Send to the search channel.
-	for pairAddr := range pairAddrsCh {
-		p.TxHistorySearch <- struct {
-			TargetTx       *types.Transaction
-			TargetPairAddr common.Address
-		}{
-			TargetTx:       transaction,
-			TargetPairAddr: pairAddr,
-		}
-	}
-}
-
-// listenHistory gets triggered when a transaction gets added to history channel.
-func (p *PairUpdater) listenHistory() {
-	// Generate new channels.
-	p.TxHistoryReset = make(chan bool)
-	p.TxHistoryAdd = make(chan struct {
-		Tx          *types.Transaction
-		Option      *circle.TradeOption
-		BlockNumber *big.Int
-	})
-	p.TxHistorySearch = make(chan struct {
-		TargetTx       *types.Transaction
-		TargetPairAddr common.Address
-	})
-
-	// Generate new history.
-	p.hashToOptionHistory = make(map[common.Hash]*circle.TradeOption)
-	p.hashToTxHistory = make(map[common.Hash]*types.Transaction)
-	p.hashToTxBlock = make(map[common.Hash]*big.Int)
-
-	go func() {
-		for {
-			select {
-			// Reset channel is prioritized.
-			case _ = <-p.TxHistoryReset:
-				// Clear account pending history.
-				p.accountToPendingTx.Range(func(key interface{}, value interface{}) bool {
-					p.accountToPendingTx.Delete(key)
-					return true
-				})
-
-				// Reset the history.
-				if len(p.hashToTxHistory) == 0 {
-					continue
-				}
-
-				logger.Log.WithField("historyLen", len(p.hashToTxHistory)).Debugln("History cleared!")
-				p.hashToOptionHistory = make(map[common.Hash]*circle.TradeOption)
-				p.hashToTxHistory = make(map[common.Hash]*types.Transaction)
-				p.hashToTxBlock = make(map[common.Hash]*big.Int)
-			default:
-			case txInfo := <-p.TxHistoryAdd:
-				// Iterate over pair addresses.
-				p.hashToOptionHistory[txInfo.Tx.Hash()] = txInfo.Option
-				p.hashToTxHistory[txInfo.Tx.Hash()] = txInfo.Tx
-				p.hashToTxBlock[txInfo.Tx.Hash()] = txInfo.BlockNumber
-				logger.Log.WithField("historyLen", len(p.hashToTxHistory)).Debugln("Added to the history!")
-			case searchInfo := <-p.TxHistorySearch:
-				// Skip if history is empty.
-				if len(p.hashToOptionHistory) == 0 {
-					continue
-				}
-
-				// Search history.
-				for prevTxHash, prevOption := range p.hashToOptionHistory {
-					// Get previous transaction's block number.
-					prevTxBlock := p.hashToTxBlock[prevTxHash]
-					latestBlock := new(big.Int).SetUint64(p.highestBlockNum.Load().(uint64))
-					if latestBlock.Cmp(prevTxBlock) != 0 {
-						break
-					}
-
-					// Continue if none of the pairs are used in that transaction.
-					if !slices.Contains(prevOption.Circle.PairAddresses, searchInfo.TargetPairAddr) {
-						continue
-					}
-
-					// Get the previous transaction.
-					prevTx := p.hashToTxHistory[prevTxHash]
-					tradeOption := p.hashToOptionHistory[prevTxHash]
-
-					// Continue if block has already passed.
-					if prevTxBlock.Uint64() >= p.GetHighestBlockNumber() {
-						logger.Log.WithField("hash", prevTxHash.String()).Infoln("Block has already passed! Skipping this transaction...")
-						continue
-					}
-
-					// Continue if gas price is lower.
-					if prevTx.GasPrice().Cmp(searchInfo.TargetTx.GasPrice()) > 0 {
-						continue
-					}
-
-					// Calculate the frontrun gas cost. (%15 more gas.)
-					frontrunGasPrice := new(big.Int).Mul(searchInfo.TargetTx.GasPrice(), big.NewInt(115))
-					frontrunGasPrice.Div(frontrunGasPrice, big.NewInt(100))
-
-					// Calculate the profit limit of the option.
-					newTradeProfitLimit := prevOption.GetTradeCost(frontrunGasPrice)
-					tradeProfit, err := prevOption.NormalProfit()
-					if err != nil {
-						logger.Log.WithError(err).Errorln("Unable to calculate trade profit.")
-						utils.PrintTradeOption(prevOption)
-						continue
-					}
-
-					// Get from.
-					prevAccountMsg, err := searchInfo.TargetTx.AsMessage(types.LatestSignerForChainID(variables.ChainId), big.NewInt(1))
-					if err != nil {
-						logger.Log.WithError(err).Fatalln("Unable to get transaction as message.")
-					}
-
-					// Log fields.
-					logFields := logrus.Fields{
-						"targetTx":        searchInfo.TargetTx.Hash(),
-						"account":         prevAccountMsg.From(),
-						"nonce":           prevAccountMsg.Nonce(),
-						"ourTx":           prevTx.Hash(),
-						"pairAddr":        searchInfo.TargetPairAddr,
-						"updatedGasPrice": fmt.Sprintf("%.3f Gwei", utils.WeiToUnit(frontrunGasPrice, big.NewInt(9))),
-					}
-
-					// Check if we are still in profit.
-					if tradeProfit.Cmp(newTradeProfitLimit) >= 0 {
-						logger.Log.WithFields(logFields).Infoln("Updating trade transaction to frontrun competitors...")
-						logger.Log.Infoln("")
-
-						// Increase the gas price and resend transaction again.
-						replacedTx := p.increaseTxGasPrice(prevTx, tradeOption, prevTxBlock, frontrunGasPrice)
-
-						// Replace.
-						if replacedTx != nil {
-							delete(p.hashToOptionHistory, prevTxHash)
-							delete(p.hashToTxHistory, prevTxHash)
-							delete(p.hashToTxBlock, prevTxHash)
-							p.hashToOptionHistory[replacedTx.Hash()] = prevOption
-							p.hashToTxHistory[replacedTx.Hash()] = replacedTx
-							p.hashToTxBlock[replacedTx.Hash()] = prevTxBlock
-						}
-					} else {
-						// Calculate the cancel gas cost. (%15 more gas.)
-						cancelGasPrice := new(big.Int).Mul(prevTx.GasPrice(), big.NewInt(115))
-						cancelGasPrice.Div(cancelGasPrice, big.NewInt(100))
-
-						// Enable auto-cancel
-						if cancelGasPrice.Cmp(variables.CancelThresholdGasPrice) > 0 {
-							logger.Log.WithFields(logFields).Infoln("Trade transaction might not be profitable anymore! Cancelling transaction...")
-
-							// Frontrun your own transaction and replace it with blank tx.
-							replacedTx := p.cancelTx(prevTx, tradeOption, prevTxBlock, cancelGasPrice)
-
-							// Delete from history.
-							if replacedTx != nil {
-								delete(p.hashToOptionHistory, prevTx.Hash())
-								delete(p.hashToTxHistory, prevTxHash)
-								delete(p.hashToTxBlock, prevTxHash)
-							}
-						}
-					}
-				}
-			}
-		}
-	}()
+	// Unlock write lock.
+	p.pairToMinGasPriceMutex.Unlock()
 }
 
 // increaseTxGasPrice
 //	Increases the transaction's gas price and re-sends it again.
 func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.TradeOption, prevBlock *big.Int, targetGasPrice *big.Int) *types.Transaction {
-
 	// Replace transaction.
 	replaceTransaction := types.NewTx(&types.LegacyTx{
 		Nonce:    tx.Nonce(),
@@ -1038,21 +484,17 @@ func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.T
 		logger.Log.WithError(err).Fatalln("Unable to sign replacement transaction.")
 	}
 
-	// Send the transaction.
-	err = p.backend.SendTransaction(context.Background(), signedTx)
-	if err != nil {
-		logger.Log.WithError(err).Fatalln("Unable to send replacement transaction..")
+	// Send transaction to channel.
+	p.tradeCh <- TradeAction{
+		BlockNumber:         prevBlock,
+		Transaction:         signedTx,
+		ReplacedTransaction: tx,
+		TradeOption:         option,
 	}
-
-	logger.Log.WithFields(logrus.Fields{
-		"oldTx":           tx.Hash(),
-		"newTx":           signedTx.Hash(),
-		"updatedGasPrice": fmt.Sprintf("%.3f Gwei", utils.WeiToUnit(targetGasPrice, big.NewInt(9))),
-	}).Infoln("Replacement transaction sent!")
 
 	// Broadcast message.
 	err = variables.Hub.BroadcastMsg(
-		fmt.Sprintf("Transaction's gas price got updated! (%.3f Gwei)", utils.WeiToUnit(targetGasPrice, big.NewInt(9))),
+		fmt.Sprintf("Transaction's gas price got updated! (%.3f Gwei)", utils.WeiToGwei(targetGasPrice)),
 	)
 	if err != nil {
 		logger.Log.WithError(err).Errorln("Unable to broadcast message.")
@@ -1085,17 +527,13 @@ func (p *PairUpdater) cancelTx(tx *types.Transaction, option *circle.TradeOption
 		logger.Log.WithError(err).Fatalln("Unable to sign blank transaction.")
 	}
 
-	// Send the transaction.
-	err = p.backend.SendTransaction(context.Background(), signedTx)
-	if err != nil {
-		logger.Log.WithError(err).Errorln("Unable to send blank transaction..")
-		return nil
+	// Send transaction to channel.
+	p.tradeCh <- TradeAction{
+		BlockNumber:         prevBlock,
+		Transaction:         signedTx,
+		ReplacedTransaction: tx,
+		TradeOption:         option,
 	}
-
-	logger.Log.WithFields(logrus.Fields{
-		"replacedTx":      signedTx.Hash(),
-		"updatedGasPrice": fmt.Sprintf("%.3f Gwei", utils.WeiToUnit(targetGasPrice, big.NewInt(9))),
-	}).Infoln("Blank transaction sent!")
 
 	// Broadcast message.
 	err = variables.Hub.BroadcastMsg("Transaction got canceled because It's not profitable anymore!")
@@ -1108,12 +546,12 @@ func (p *PairUpdater) cancelTx(tx *types.Transaction, option *circle.TradeOption
 
 // quickSortCircles
 //	Quick sorts the circles.
-func (p *PairUpdater) quickSortCircles() []*circle.TradeOption {
+func (p *PairUpdater) quickSortCircles() ([]*circle.TradeOption, []*big.Int) {
 	// Get circles as array.
 	tradeArr := make([]interface{}, 0)
 	for _, value := range p.Circles {
 		// Calculate optimal in.
-		optimalIn, amountsOut, err := p.GetOptimalIn(value)
+		optimalIn, amountsOut, reserves, err := p.GetOptimalIn(value)
 		if err != nil && err != variables.NoArbitrage {
 			logger.Log.WithError(err).Fatalln("Unable to sort trade options.")
 		} else if err == variables.NoArbitrage {
@@ -1121,7 +559,7 @@ func (p *PairUpdater) quickSortCircles() []*circle.TradeOption {
 		}
 
 		// Generate new trade option.
-		option, err := circle.NewTradeOption(value, optimalIn, amountsOut)
+		option, err := circle.NewTradeOption(value, optimalIn, amountsOut, reserves)
 		if err != nil {
 			continue
 		}
@@ -1150,10 +588,12 @@ func (p *PairUpdater) quickSortCircles() []*circle.TradeOption {
 
 	// Convert interface to trade.
 	tmp := make([]*circle.TradeOption, len(tradeArr))
+	gasPrices := make([]*big.Int, len(tradeArr))
 	for i, v := range tradeArr {
 		tmp[i] = v.(*circle.TradeOption)
+		gasPrices[i] = p.GetGasPriceForPairs(tmp[i].Circle.PairAddresses)
 	}
-	return tmp
+	return tmp, gasPrices
 
 	// The quicksort.
 	// return p.quickSortUtil(tradeArr, 0, len(tradeArr)-1)
@@ -1252,12 +692,6 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 			panic("token addresses are not right for pair")
 		}
 
-		// Skip low liquidity.
-		resIn, resOut, err := _pair.GetSortedReserves(tempOutToken)
-		if err != nil || resIn.Cmp(big.NewInt(1e15)) <= 0 || resOut.Cmp(big.NewInt(1e15)) <= 0 {
-			continue
-		}
-
 		// Get token symbol.
 		tempOutSymbol, ok := u.params.Tokens.Symbols[tempOutToken]
 		if !ok {
@@ -1279,7 +713,6 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 			newRoute := make([]common.Address, len(params.Route))
 			newRouteFees := make([]*big.Int, len(params.Route))
 			newRouteTokens := make([][]common.Address, len(params.Route))
-			newRouteReserves := make([][]*big.Int, len(params.Route))
 
 			// Copy old variables.
 			copy(newPath, params.Path)
@@ -1287,7 +720,6 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 			copy(newRoute, params.Route)
 			copy(newRouteFees, params.RouteFees)
 			copy(newRouteTokens, params.RouteTokens)
-			copy(newRouteReserves, params.RouteReserves)
 
 			// Append new variables.
 			newPath = append(newPath, tempOutToken)
@@ -1295,7 +727,6 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 			newRouteFees = append(newRouteFees, routeFee)
 			newRoute = append(newRoute, _pair.Address())
 			newRouteTokens = append(newRouteTokens, pairTokens)
-			newRouteReserves = append(newRouteReserves, _pair.GetReserves())
 
 			// Get route as structs.
 			tmpPairs := make([]*dexpair.DexPair, len(newRoute))
@@ -1311,7 +742,6 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 				newRouteFees,
 				newRouteTokens,
 				newRoute,
-				newRouteReserves,
 			)
 			if err != nil {
 				logger.Log.WithError(err).Fatalln("Unable to generate new circle.")
@@ -1330,26 +760,23 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 		} else {
 			// The params.
 			newParams := DFSCircleParams{
-				Path:          make([]common.Address, len(params.Path)),
-				Symbols:       make([]string, len(params.Symbols)),
-				Route:         make([]common.Address, len(params.Route)),
-				RouteFees:     make([]*big.Int, len(params.Route)),
-				RouteTokens:   make([][]common.Address, len(params.Route)),
-				RouteReserves: make([][]*big.Int, len(params.Route)),
+				Path:        make([]common.Address, len(params.Path)),
+				Symbols:     make([]string, len(params.Symbols)),
+				Route:       make([]common.Address, len(params.Route)),
+				RouteFees:   make([]*big.Int, len(params.Route)),
+				RouteTokens: make([][]common.Address, len(params.Route)),
 			}
 			copy(newParams.Path, params.Path)
 			copy(newParams.Symbols, params.Symbols)
 			copy(newParams.Route, params.Route)
 			copy(newParams.RouteFees, params.RouteFees)
 			copy(newParams.RouteTokens, params.RouteTokens)
-			copy(newParams.RouteReserves, params.RouteReserves)
 
 			newParams.Path = append(newParams.Path, tempOutToken)
 			newParams.Symbols = append(newParams.Symbols, tempOutSymbol)
 			newParams.Route = append(params.Route, _pair.Address())
 			newParams.RouteFees = append(params.RouteFees, routeFee)
 			newParams.RouteTokens = append(params.RouteTokens, pairTokens)
-			newParams.RouteReserves = append(newParams.RouteReserves, _pair.GetReserves())
 
 			// Recursive
 			wg.Add(1)
@@ -1358,22 +785,22 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 	}
 }
 
-// multiCall
-// 	Calls the multiple same contracts and returns the responses. (Max 21,000 gas limit.)
-func (p *PairUpdater) multiCall(
+// newBatchCall
+// 	Generates a new BatchElem from inputs.
+func (p *PairUpdater) newBatchCall(
 	contractAbis []abi.ABI,
 	contractAddresses []common.Address,
 	functionNames []string,
 	functionArgs [][]interface{},
 	blockNumber *big.Int,
-) (*big.Int, [][]byte, error) {
+) (rpc.BatchElem, error) {
 	// Iterate through the addresses.
 	var calls []abis.MulticallCall
 	for i, contractAddr := range contractAddresses {
 		// Create new empty byte array.
 		inputBytes, err := contractAbis[i].Pack(functionNames[i], functionArgs[i]...)
 		if err != nil {
-			return nil, nil, err
+			return rpc.BatchElem{}, err
 		}
 
 		// Ready the call.
@@ -1388,43 +815,205 @@ func (p *PairUpdater) multiCall(
 	// Get the call bytes.
 	callBytes, err := multicallerAbi.Pack("aggregate", calls)
 	if err != nil {
-		return nil, nil, err
+		return rpc.BatchElem{}, err
 	}
 
-	// Create new blank message.
-	msg := ethereum.CallMsg{
-		To:   &p.params.Multicaller.Address,
-		Data: callBytes,
+	// Message map.
+	callBlockStr := fmt.Sprintf("0x%x", blockNumber.Uint64())
+	msg := map[string]interface{}{
+		"to":   p.params.Multicaller.Address.String(),
+		"data": fmt.Sprintf("0x%s", hex.EncodeToString(callBytes)),
+		"gas":  fmt.Sprintf("0x%x", 3_000_000),
 	}
 
-	// Call the aggregate function.
-	gasLimit, err := p.backend.EstimateGas(context.Background(), msg)
-	result, err := p.backend.CallContract(context.Background(), msg, blockNumber)
-	if err != nil {
-		return nil, nil, err
+	// Response variables..
+	var resHex hexutil.Bytes
+	var resError error
+
+	// Batch element.
+	return rpc.BatchElem{
+		Method: "eth_call",
+		Args:   []interface{}{msg, callBlockStr},
+		Result: &resHex,
+		Error:  resError,
+	}, nil
+}
+
+// multiCallBatch
+//	Batch calls the multicaller.
+func (p *PairUpdater) multiCallBatch(
+	contractAbis []abi.ABI,
+	contractAddresses []common.Address,
+	functionNames []string,
+	functionArgs [][]interface{},
+	blockNumber *big.Int,
+) (*big.Int, [][]byte, error) {
+	// Check inputs.
+	if len(contractAbis) != len(contractAddresses) ||
+		len(contractAbis) != len(functionNames) ||
+		len(contractAbis) != len(functionArgs) {
+		return nil, nil, variables.InvalidInput
 	}
 
-	_ = gasLimit
+	// Each call limits.
+	callGasUsage := 21_000
+	maxGasUsage := 3_000_000
 
-	// Get the results.
-	out, err := multicallerAbi.Unpack("aggregate", result)
-	if err != nil {
-		return nil, nil, err
+	// The chunk size. (+1 to make sure)
+	chunkSize := (callGasUsage * len(contractAbis) / maxGasUsage) + 1
+	chunkSize += 1 // to make sure gas limit is not exceeded.
+
+	// Split the chunk.
+	var abiChunks [][]abi.ABI = chunkBy(contractAbis, chunkSize)
+	var addressChunks [][]common.Address = chunkBy(contractAddresses, chunkSize)
+	var nameChunks [][]string = chunkBy(functionNames, chunkSize)
+	var argsChunks [][][]interface{} = chunkBy(functionArgs, chunkSize)
+
+	// Check chunk length.
+	if len(abiChunks) != len(addressChunks) ||
+		len(abiChunks) != len(nameChunks) ||
+		len(abiChunks) != len(argsChunks) ||
+		len(abiChunks) != chunkSize {
+
+		fmt.Println(len(abiChunks), len(addressChunks), len(nameChunks), len(argsChunks), chunkSize)
+		panic("something is wrong with the chunk sizes")
 	}
 
-	return *abi.ConvertType(out[0], new(*big.Int)).(**big.Int), out[1].([][]byte), nil
+	var err error
+
+	// Check block number.
+	if blockNumber.Cmp(common.Big0) == 0 {
+		blockNumber = new(big.Int).SetUint64(p.GetHighestBlockNumber())
+	}
+
+	// Ready multicall arguments.
+	allBatchElements := make([]rpc.BatchElem, chunkSize)
+	for i, _ := range addressChunks {
+		allBatchElements[i], err = p.newBatchCall(abiChunks[i], addressChunks[i], nameChunks[i], argsChunks[i], blockNumber)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Parse batch elements into chunks.
+	var chunkCount = (len(allBatchElements) / 2) + 1
+	var batchElementChunks [][]rpc.BatchElem = chunkBy(allBatchElements, chunkCount)
+
+	// Wait group and channel.
+	wg := new(sync.WaitGroup)
+	ch := make(chan struct {
+		Elements []rpc.BatchElem
+		Index    int
+	}, chunkCount)
+
+	// Batch call for each chunk.
+	for i, batchElementChunk := range batchElementChunks {
+		// Increase the counter.
+		wg.Add(1)
+
+		// Start batch call in another goroutine.
+		go func(chunk []rpc.BatchElem, index int) {
+			defer wg.Done()
+
+			// Batch call.
+			err = p.rpcBackend.BatchCallContext(context.Background(), chunk)
+			if err != nil {
+				logger.Log.WithError(err).Fatalln("Unable to batch call.")
+			}
+
+			// Send to the channel.
+			ch <- struct {
+				Elements []rpc.BatchElem
+				Index    int
+			}{
+				Elements: chunk,
+				Index:    index,
+			}
+		}(batchElementChunk, i)
+	}
+
+	// Wait.
+	wg.Wait()
+	close(ch)
+
+	// The return bytes map.
+	chunksMap := make(map[int][][]byte)
+
+	// Iterate over channel.
+	for tmp := range ch {
+		// Output response.
+		var batchReturnBytes = make([][]byte, 0)
+
+		// Iterate over elements
+		for _, batchElement := range tmp.Elements {
+			// Check error.
+			if batchElement.Error != nil {
+				return nil, nil, batchElement.Error
+			}
+
+			// Check result.
+			if batchElement.Result == nil {
+				return nil, nil, variables.EmptyResponse
+			}
+
+			// Unpack the result.
+			var out, err = multicallerAbi.Unpack("aggregate", *(batchElement.Result.(*hexutil.Bytes)))
+			if err != nil {
+				return nil, nil, err
+			}
+
+			// The call block number.
+			callBlockNum := *abi.ConvertType(out[0], new(*big.Int)).(**big.Int)
+			if blockNumber.Cmp(common.Big0) != 0 && callBlockNum.Cmp(blockNumber) != 0 {
+				panic("call block number is not right")
+			}
+
+			// The response bytes.
+			resBytes := out[1].([][]byte)
+			batchReturnBytes = append(batchReturnBytes, resBytes...)
+		}
+
+		// Append to the map.
+		chunksMap[tmp.Index] = batchReturnBytes
+	}
+
+	// Order the responses and combine into one.
+	allBatchReturnBytes := make([][]byte, 0)
+	for i := 0; i < chunkCount; i++ {
+		allBatchReturnBytes = append(allBatchReturnBytes, chunksMap[i]...)
+	}
+
+	// Check output.
+	if len(contractAddresses) != len(allBatchReturnBytes) {
+		panic("missing multicall response")
+	}
+
+	return blockNumber, allBatchReturnBytes, nil
 }
 
 // chunkBy
 // 	Splits items into chunks.
-func chunkBy[T any](items []T, chunkSize int) (chunks [][]T) {
-	// While there are more items remaining than chunkSize...
-	for chunkSize < len(items) {
-		// We take a slice of size chunkSize from the items array and append it to the new array
-		chunks = append(chunks, items[0:chunkSize])
-		// Then we remove those elements from the items array
-		items = items[chunkSize:]
+func chunkBy[T any](items []T, size int) (chunks [][]T) {
+	// Check parameters.
+	if len(items) < size {
+		panic("chunk size too much")
 	}
-	// Finally, we append the remaining items to the new array and return it
-	return append(chunks, items)
+
+	// The chunks.
+	chunks = make([][]T, size)
+
+	// Chunk size.
+	chunkSize := len(items) / size
+	lastChunkSize := chunkSize + (len(items) % size)
+
+	// Iterate over chunks.
+	var itemCur = 0
+	for chunkId := 0; chunkId < size-1; chunkId++ {
+		chunks[chunkId] = items[itemCur : itemCur+chunkSize]
+		itemCur = itemCur + chunkSize
+	}
+
+	// The last chunk.
+	chunks[size-1] = items[itemCur : itemCur+lastChunkSize]
+	return chunks
 }

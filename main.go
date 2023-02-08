@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/brahma-adshonor/gohook"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/gorilla/websocket"
@@ -104,7 +103,7 @@ func main() {
 	}
 
 	// Get the hot tokens from the API.
-	for tmp := utils.UpdateHotTokens(); tmp < 5; {
+	for tmp := utils.UpdateHotTokens(); variables.IsDev == false && tmp == 0; {
 		logger.Log.WithField("tokenCount", tmp).Infoln("Hot tokens API is not ready yet! Waiting 1 min...")
 		time.Sleep(1 * time.Minute)
 	}
@@ -161,6 +160,7 @@ func main() {
 			},
 		},
 		variables.EthClient,
+		variables.RpcClient,
 		simulationClient,
 	)
 
@@ -205,7 +205,7 @@ func main() {
 }
 
 // onSort gets triggered on new sort event.
-func onSort(header *types.Header, options []*circle.TradeOption, updateTime time.Duration, u *updater.PairUpdater) {
+func onSort(sortBlockNum *big.Int, options []*circle.TradeOption, gasPrices []*big.Int, sortTime time.Duration, u *updater.PairUpdater) {
 	// Check balance.
 	go checkBalance()
 
@@ -214,7 +214,8 @@ func onSort(header *types.Header, options []*circle.TradeOption, updateTime time
 		// Print the best 5 options.
 		var tradesJson = make([]circle.TradeOptionJSON, 5)
 		for i, opt := range options {
-			tradesJson[i] = opt.GetJSON()
+			// Get the best gas price for the option.
+			tradesJson[i] = opt.GetJSON(gasPrices[i])
 
 			if i == 4 {
 				break
@@ -222,7 +223,7 @@ func onSort(header *types.Header, options []*circle.TradeOption, updateTime time
 		}
 
 		// broadcast ranks
-		err := variables.Hub.BroadcastRanks(tradesJson, updateTime.Milliseconds(), header.Number.Uint64())
+		err := variables.Hub.BroadcastRanks(tradesJson, sortTime.Milliseconds(), sortBlockNum.Uint64())
 		if err != nil {
 			logger.Log.WithError(err).Fatalln("Unable to marshal trade.")
 		}
@@ -232,6 +233,7 @@ func onSort(header *types.Header, options []*circle.TradeOption, updateTime time
 	alreadyUsedPairs := make([]common.Address, 0)
 
 	// Estimate circles.
+	// todo it is time to delete that maybe
 	if variables.IsDev {
 		go func() {
 			circleGases, _, errs := estimateCircles(options)
@@ -248,11 +250,12 @@ func onSort(header *types.Header, options []*circle.TradeOption, updateTime time
 	}
 
 	// Check circles.
-	for _, swapCircle := range options {
+	for i, swapCircle := range options {
 		// Check if profitable.
 		profit, _ := swapCircle.NormalProfit()
-		triggerLim := swapCircle.GetTradeCost(variables.GasPrice)
+		triggerLim := swapCircle.GetTradeCost(gasPrices[i])
 		if profit.Cmp(triggerLim) < 0 {
+			// TODO check here before commit
 			return
 		}
 
@@ -272,7 +275,7 @@ func onSort(header *types.Header, options []*circle.TradeOption, updateTime time
 		}
 
 		// Trigger the best swap.
-		triggerSwap(swapCircle, triggerLim, profit, header.Number, u)
+		triggerSwap(swapCircle, triggerLim, profit, sortBlockNum, gasPrices[i], u)
 		break
 	}
 }
@@ -286,7 +289,7 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 	}
 	transactor.NoSend = true
 	transactor.GasPrice = variables.GasPrice
-	transactor.Value = common.Big0
+	transactor.Value = new(big.Int).Set(common.Big0)
 
 	// Wait group and channel.
 	ch := make(chan struct {
@@ -300,7 +303,7 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 		// The parameters.
 		param := abis.SwapParameters{
 			Pairs:                 tradeOption.Circle.PairAddresses,
-			Reserves:              tradeOption.Circle.PairReserves,
+			Reserves:              tradeOption.Reserves,
 			Path:                  tradeOption.Circle.Path,
 			AmountsOut:            tradeOption.AmountsOut,
 			PairTokens:            tradeOption.Circle.PairTokens,
@@ -361,7 +364,7 @@ func estimateCircles(swapCircles []*circle.TradeOption) ([]uint64, uint64, []err
 }
 
 // triggerSwap triggers a new swap with circle.
-func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int, number *big.Int, u *updater.PairUpdater) {
+func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int, number *big.Int, gasPrice *big.Int, u *updater.PairUpdater) {
 	// broadcast buy.
 	go func() {
 		err := variables.Hub.BroadcastMsg(fmt.Sprintf(
@@ -382,14 +385,15 @@ func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int,
 	}
 
 	// Set transactor values.
-	transactor.GasPrice = variables.GasPrice
-	transactor.Value = common.Big0
+	transactor.GasPrice = gasPrice
+	transactor.Value = new(big.Int).Set(common.Big0)
 	transactor.GasLimit = tradeOption.NormalGasSpent() + tradeOption.NormalGasTokenAmount()*10000
+	transactor.NoSend = true
 
 	// The parameter.
 	param := abis.SwapParameters{
 		Pairs:                 tradeOption.Circle.PairAddresses,
-		Reserves:              tradeOption.Circle.PairReserves,
+		Reserves:              tradeOption.Reserves,
 		Path:                  tradeOption.Circle.Path,
 		AmountsOut:            tradeOption.AmountsOut,
 		PairTokens:            tradeOption.Circle.PairTokens,
@@ -398,35 +402,24 @@ func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int,
 		RevertOnReserveChange: true,
 	}
 
-	// Send transaction.
+	// Ready transaction.
 	tx, err := variables.SwapExec.ExecuteSwap(transactor, param)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
-			"circle": tradeOption.GetJSON(),
+			"circle": tradeOption.GetJSON(gasPrice),
 		}).WithError(err).Errorln("Unable to estimate gas for the transaction.")
 		return
 	}
 
-	// Add to the history.
-	u.TxHistoryAdd <- struct {
-		Tx          *types.Transaction
-		Option      *circle.TradeOption
-		BlockNumber *big.Int
-	}{Tx: tx, Option: tradeOption, BlockNumber: number}
-
-	// Log transaction.
-	logger.Log.Infoln("")
-	logger.Log.Infoln("Arbitrage Transaction Sent!")
-	logger.Log.Infoln("===========================")
-	logger.Log.Infoln("Hash     :", tx.Hash().String())
-	logger.Log.Infoln("Block    :", number)
-	logger.Log.Infoln("Path     :", tradeOption.Circle.SymbolsStr())
-	logger.Log.Infoln("Pairs    :", tradeOption.Circle.PairAddressesStr())
-	logger.Log.Infoln("Profit   :", fmt.Sprintf("%.15f BNB", utils.WeiToEthers(profit)))
-	logger.Log.Infoln("Threshold:", fmt.Sprintf("%.15f BNB", utils.WeiToEthers(lim)))
-	logger.Log.Infoln("Gas Usage:", (tradeOption.NormalGasSpent()+tradeOption.NormalGasTokenAmount()*10000)-tradeOption.NormalChiRefund())
-	logger.Log.Infoln("Chi Usage:", tradeOption.NormalGasTokenAmount(), "CHI")
-	logger.Log.Infoln("")
+	// Send it to the trade channel.
+	err = u.DoTrade(updater.TradeAction{
+		BlockNumber: number,
+		TradeOption: tradeOption,
+		Transaction: tx,
+	})
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Updater not initialized yet! How tf you did this ?")
+	}
 }
 
 // checkBalance checks the wallet balance and stops when too low.

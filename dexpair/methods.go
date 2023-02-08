@@ -2,8 +2,10 @@ package dexpair
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/tarik0/DexEqualizer/logger"
 	"github.com/tarik0/DexEqualizer/variables"
 	"math/big"
+	"sync/atomic"
 )
 
 // Address is the pair address.
@@ -21,42 +23,83 @@ func (d *DexPair) TokenB() common.Address {
 	return d.tokenB
 }
 
-// GetLatestUpdateBlock returns the latest block that reserves are updated.
-func (d *DexPair) GetLatestUpdateBlock() (*big.Int, error) {
-	val := d.reservesAndLatestBlock.Load()
-	if val == nil || (val.([3]*big.Int))[2] == nil {
-		return nil, variables.InvalidInput
-	}
-	return (val.([3]*big.Int))[2], nil
-}
-
 // SetReserves updates the pair reserves.
-func (d *DexPair) SetReserves(reserveA *big.Int, reserveB *big.Int, blockNum *big.Int) {
-	// Skip if blockNum < latestUpdateBlock
-	latestUpdateBlock, err := d.GetLatestUpdateBlock()
-	if blockNum.Cmp(common.Big0) != 0 && err != nil && blockNum.Cmp(latestUpdateBlock) < 0 {
+func (d *DexPair) SetReserves(reserveA *big.Int, reserveB *big.Int, blockNum *big.Int, txIndex *big.Int, logIndex *big.Int) {
+	// Check concurrency.
+	if old := atomic.SwapInt32(d.isConcurrent, 1); old == 1 {
+		panic("concurrent reserve read/write")
+	}
+	defer atomic.StoreInt32(d.isConcurrent, 0)
+
+	// The flags.
+	compareBlock := blockNum.Cmp(d.lastUpdateBlock)
+	compareTxIndex := txIndex.Cmp(d.lastUpdateTxIndex)
+	compareLogIndex := logIndex.Cmp(d.lastUpdateLogIndex)
+
+	// Return if block is lower.
+	if compareBlock < 0 {
 		return
 	}
 
-	d.reservesAndLatestBlock.Store([3]*big.Int{reserveA, reserveB, blockNum})
+	// Return if block is same but tx index is lower.
+	if compareBlock == 0 && compareTxIndex < 0 {
+		return
+	}
+
+	// Return if block and the tx index is same but log index is lower.
+	if compareBlock == 0 && compareTxIndex == 0 && compareLogIndex < 0 {
+		return
+	}
+
+	// Return if it's the same log.
+	if compareBlock == 0 && compareTxIndex == 0 && compareLogIndex == 0 {
+		return
+	}
+
+	logger.Log.
+		WithField("address", d.address).
+		WithField("res0", reserveA).
+		WithField("res1", reserveB).
+		WithField("block", blockNum).
+		WithField("txIndex", txIndex).
+		WithField("logIndex", logIndex).
+		Debugln("Pair reserves updated!")
+
+	d.res0.Set(reserveA)
+	d.res1.Set(reserveB)
+	d.lastUpdateTxIndex.Set(txIndex)
+	d.lastUpdateBlock.Set(blockNum)
+
+	// Compare variables.
+	if d.res0.Cmp(reserveA) != 0 || d.res1.Cmp(reserveB) != 0 {
+		panic("wtf")
+	}
 }
 
 // GetReserves returns the reserves.
 func (d *DexPair) GetReserves() []*big.Int {
-	val := d.reservesAndLatestBlock.Load().([3]*big.Int)
-	return []*big.Int{val[0], val[1]}
+	// Check concurrency.
+	if old := atomic.SwapInt32(d.isConcurrent, 1); old == 1 {
+		panic("concurrent reserve read/write")
+	}
+	defer atomic.StoreInt32(d.isConcurrent, 0)
+
+	return []*big.Int{new(big.Int).Set(d.res0), new(big.Int).Set(d.res1)}
 }
 
 // GetSortedReserves sorts the reserves and returns.
 func (d *DexPair) GetSortedReserves(address common.Address) (reserveIn *big.Int, reserveOut *big.Int, err error) {
-	// Get reserves.
-	val := d.reservesAndLatestBlock.Load().([3]*big.Int)
+	// Check concurrency.
+	if old := atomic.SwapInt32(d.isConcurrent, 1); old == 1 {
+		panic("concurrent reserve read/write")
+	}
+	defer atomic.StoreInt32(d.isConcurrent, 0)
 
 	// Sort reserves.
 	if address == d.tokenA {
-		reserveIn, reserveOut, err = new(big.Int).Set(val[0]), new(big.Int).Set(val[1]), nil
+		reserveIn, reserveOut, err = new(big.Int).Set(d.res0), new(big.Int).Set(d.res1), nil
 	} else if address == d.tokenB {
-		reserveIn, reserveOut, err = new(big.Int).Set(val[1]), new(big.Int).Set(val[0]), nil
+		reserveIn, reserveOut, err = new(big.Int).Set(d.res1), new(big.Int).Set(d.res0), nil
 	} else {
 		reserveIn, reserveOut, err = nil, nil, variables.InvalidInput
 	}

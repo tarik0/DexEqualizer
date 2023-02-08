@@ -7,9 +7,21 @@ import (
 	"strings"
 )
 
+// The decimals.
+
+var (
+	EtherDecimals = big.NewInt(18)
+	GweiDecimals  = big.NewInt(9)
+)
+
 // WeiToEthers parses the amounts to ethers.
 func WeiToEthers(wei *big.Int) *big.Float {
-	return WeiToUnit(wei, big.NewInt(18))
+	return WeiToUnit(wei, EtherDecimals)
+}
+
+// WeiToGwei parses the amounts to Gwei.
+func WeiToGwei(wei *big.Int) *big.Float {
+	return WeiToUnit(wei, GweiDecimals)
 }
 
 // WeiToUnit parses the amounts to some decimals.
