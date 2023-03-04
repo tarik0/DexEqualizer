@@ -4,7 +4,7 @@ This is an arbitrage bot that does triangular arbitrage between Uniswap V2 clone
 Since the bot is barely profitable anymore, I've decided to publish it with the GitHub.
 I've really worked hard for this bot for around ~2 months, and I've learnt a lot of things about EVM.
 
-There is only few changes of arbitrage and if someone frontruns you, you can't get anything from that arbitrage change
+There is only few chance of arbitrage and if someone frontruns you, you can't get anything from that arbitrage chance
 and there are many "researchers" in the field. Even through I've tried many options I couldn't able to gain the amounts I've hoped for.
 
 I've both tried flashloan and regular triangular arbitrages and you can find the contracts for the flashloan arbitrage in other branch of this repository.
