@@ -11,19 +11,11 @@ I've both tried flashloan and regular triangular arbitrages and you can find the
 
 I won't be publishing how to use this, but you can manage to work out from the source code.
 
-# Arbitrage Opportunities
+# Web UI
 
-There are many variables that changes the arbitrage opportunity, some of them are;
+The Web UI is just a simple HTML page with Websocket that communicates with the bot and visualizes transactions.
 
-- The gas you are using in the arbitrage transaction.
-- The tokens that you are monitoring for arbitrage.
-- The DEX'es that you are monitoring for arbitrage.
-
-Basically, the first one determines your profit from the transaction. If you use less gas for the transaction,
-you are going find more arbitrage opportunities because you're sniping limit gets lower.
-For the second and the third ones, you can be the first one to find the arbitrage opportunities if you are looking to a pair that no-one is checking.
-
-TL;DR, each swap costs gas and you must lower the gas usage to make your transaction work. You must find a strategy to pass others.
+![Web UI Screenshots](./image.png "Web UI Screenshots")
 
 # Transaction Examples
 
@@ -32,6 +24,7 @@ Those are few examples of the transactions that bot sent.
 - https://bscscan.com/tx/0x3db3f6af4e8b7449aa8a3e683303cb06f1d1b080d409eb69503b5a1bc9513ac8
 - https://bscscan.com/tx/0xe4bca19c8ad9e82078e8f542eafc3639e2b3680622b7098f71bc9e05ec0e9f1b
 - https://bscscan.com/tx/0x3db3f6af4e8b7449aa8a3e683303cb06f1d1b080d409eb69503b5a1bc9513ac8
+
 
 # Features
 
@@ -54,6 +47,21 @@ There might be other features that I forgot to mention.
 - Auto stop on low CHI balance.
 - Supports multihop between tokens.
 - Auto calculate the input amount.
+
+# Arbitrage Opportunities
+
+There are many variables that changes the arbitrage opportunity, some of them are;
+
+- The gas you are using in the arbitrage transaction.
+- The tokens that you are monitoring for arbitrage.
+- The DEX'es that you are monitoring for arbitrage.
+
+Basically, the first one determines your profit from the transaction. If you use less gas for the transaction,
+you are going find more arbitrage opportunities because you're sniping limit gets lower.
+For the second and the third ones, you can be the first one to find the arbitrage opportunities if you are looking to a pair that no-one is checking.
+
+TL;DR, each swap costs gas and you must lower the gas usage to make your transaction work. You must find a strategy to pass others.
+
 
 # Config Template
 
@@ -96,3 +104,8 @@ Arbitrage Options:
   Gas Options:
     Extra Gas Percent: 25
 ```
+# Support ❤️
+
+You can help me and my projects by donating to this wallet;
+(BSC, ETH, SOL, stable tokens.)
+[0x2d5dA0a6DdDdD7598ebBA223cB82D3088e9c843a](https://bscscan.com/address/0x2d5da0a6ddddd7598ebba223cb82d3088e9c843a).
