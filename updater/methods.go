@@ -185,14 +185,28 @@ func (p *PairUpdater) GetPairFee(addr common.Address) (*big.Int, error) {
 
 // GetTokenFee
 //	Helper function to retrieve token's fee.
-func (p *PairUpdater) GetTokenFee(addr common.Address) (*big.Int, error) {
+func (p *PairUpdater) GetTokenFee(addr common.Address) (buyFee *big.Int, sellFee *big.Int, err error) {
 	// Get token's fee.
-	inFee, ok := p.params.Tokens.Fees[addr]
+	val, ok := p.params.Tokens.Infos[addr]
 	if !ok {
-		return nil, variables.InvalidInput
+		err = variables.InvalidInput
+		return
 	}
 
-	return new(big.Int).Set(inFee), nil
+	return new(big.Int).Set(val.BuyFee), new(big.Int).Set(val.SellFee), nil
+}
+
+// GetTokenGas
+//	Helper function to retrieve token's swap gas.
+func (p *PairUpdater) GetTokenGas(addr common.Address) (gas *big.Int, err error) {
+	// Get token's fee.
+	val, ok := p.params.Tokens.Infos[addr]
+	if !ok {
+		err = variables.InvalidInput
+		return
+	}
+
+	return new(big.Int).Set(val.SwapGas), nil
 }
 
 // GetHighestBlockNumber
@@ -251,9 +265,10 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (
 			return nil, nil, nil, err
 		}
 
+		// TODO add sell fee to this equation too (i wish u luck)
 		// Get token fees.
-		inFee, err := p.GetTokenFee(c.Path[pairId])
-		outFee, err := p.GetTokenFee(c.Path[pairId+1])
+		inFee, _, err := p.GetTokenFee(c.Path[pairId])
+		outFee, _, err := p.GetTokenFee(c.Path[pairId+1])
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -318,7 +333,7 @@ func (p *PairUpdater) GetOptimalIn(c *circle.Circle) (
 			d = new(big.Int).Set(common.Big0)
 		} else if pairId == 1 {
 			// Get the first token's fee.
-			firstTokenFee, err := p.GetTokenFee(c.Path[0])
+			firstTokenFee, _, err := p.GetTokenFee(c.Path[0])
 			if err != nil {
 				return nil, nil, nil, err
 			}
@@ -432,8 +447,8 @@ func (p *PairUpdater) GetAmountsOut(
 		}
 
 		// Get token fees.
-		inputTokenFee, err := p.GetTokenFee(path[i])
-		outputTokenFee, err := p.GetTokenFee(path[i+1])
+		_, inputTokenSellFee, err := p.GetTokenFee(path[i])
+		outputTokenBuyFee, _, err := p.GetTokenFee(path[i+1])
 		if err != nil {
 			return nil, err
 		}
@@ -446,7 +461,9 @@ func (p *PairUpdater) GetAmountsOut(
 
 		// Amount in.
 		tmpIn := new(big.Int).Set(amountsOut[i])
-		tmpIn = utils.CutFee(tmpIn, inputTokenFee)
+
+		// Cut sell fee.
+		tmpIn = utils.CutFee(tmpIn, inputTokenSellFee)
 
 		// Calculate
 		_, amountOut, err := utils.GetAmountOut(tmpIn, pairFee, resIn, resOut)
@@ -454,8 +471,8 @@ func (p *PairUpdater) GetAmountsOut(
 			return nil, err
 		}
 
-		// Cut fee.
-		amountOut = utils.CutFee(amountOut, outputTokenFee)
+		// Cut buy fee.
+		amountOut = utils.CutFee(amountOut, outputTokenBuyFee)
 
 		// Check if amount out is zero.
 		if amountOut.Cmp(common.Big0) <= 0 {

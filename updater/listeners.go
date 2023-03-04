@@ -162,9 +162,9 @@ func (p *PairUpdater) listenHistory() {
 						continue
 					}
 
-					// Calculate the frontrun gas cost. (%15 more gas.)
-					frontrunGasPrice := new(big.Int).Mul(searchInfo.TargetTx.GasPrice(), big.NewInt(115))
-					frontrunGasPrice.Div(frontrunGasPrice, big.NewInt(100))
+					// Calculate the frontrun gas cost. (%0.1 more gas.)
+					frontrunGasPrice := new(big.Int).Mul(searchInfo.TargetTx.GasPrice(), big.NewInt(1100))
+					frontrunGasPrice.Div(frontrunGasPrice, big.NewInt(1000))
 
 					// Calculate the profit limit of the option.
 					newTradeProfitLimit := prevOption.GetTradeCost(frontrunGasPrice)
@@ -197,7 +197,7 @@ func (p *PairUpdater) listenHistory() {
 						logger.Log.Infoln("")
 
 						// Increase the gas price and resend transaction again.
-						replacedTx := p.increaseTxGasPrice(prevTx, tradeOption, prevTxBlock, frontrunGasPrice)
+						replacedTx := p.increaseTxGasPrice(prevTx, tradeOption, prevTxBlock, frontrunGasPrice, searchInfo.TargetTx.Hash())
 
 						// Replace.
 						if replacedTx != nil {
@@ -209,8 +209,8 @@ func (p *PairUpdater) listenHistory() {
 							p.hashToTxBlock[replacedTx.Hash()] = prevTxBlock
 						}
 					} else {
-						// Calculate the cancel gas cost. (%15 more gas.)
-						cancelGasPrice := new(big.Int).Mul(prevTx.GasPrice(), big.NewInt(115))
+						// Calculate the cancel gas cost. (%11 more gas.)
+						cancelGasPrice := new(big.Int).Mul(prevTx.GasPrice(), big.NewInt(111))
 						cancelGasPrice.Div(cancelGasPrice, big.NewInt(100))
 
 						// Enable auto-cancel
@@ -218,7 +218,7 @@ func (p *PairUpdater) listenHistory() {
 							logger.Log.WithFields(logFields).Infoln("Trade transaction might not be profitable anymore! Cancelling transaction...")
 
 							// Frontrun your own transaction and replace it with blank tx.
-							replacedTx := p.cancelTx(prevTx, tradeOption, prevTxBlock, cancelGasPrice)
+							replacedTx := p.cancelTx(prevTx, tradeOption, prevTxBlock, cancelGasPrice, searchInfo.TargetTx.Hash())
 
 							// Delete from history.
 							if replacedTx != nil {
@@ -497,6 +497,7 @@ func (p *PairUpdater) onTradeAction(action TradeAction) {
 	logger.Log.Infoln("Path     :", action.TradeOption.Circle.SymbolsStr())
 	logger.Log.Infoln("Gas Price:", fmt.Sprintf("%.2f Gwei", utils.WeiToGwei(action.Transaction.GasPrice())))
 	logger.Log.Infoln("Profit   :", fmt.Sprintf("%.7f WBNB", utils.WeiToEthers(profit)))
+	logger.Log.Infoln("Gas Cost :", fmt.Sprintf("%.8f WBNB", utils.WeiToEthers(action.TradeOption.GetTradeCost(action.Transaction.GasPrice()))))
 
 	// Log amount infos.
 	logger.Log.Infoln("Amounts  :")

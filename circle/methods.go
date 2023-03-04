@@ -46,7 +46,7 @@ func (t *TradeOption) NormalProfit() (*big.Int, error) {
 
 // GetTradeCost returns trade cost of this option.
 func (t *TradeOption) GetTradeCost(gasPrice *big.Int) *big.Int {
-	gasCost := new(big.Int).SetUint64((t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) - t.NormalChiRefund())
+	gasCost := new(big.Int).SetUint64(t.NormalGasSpentWithBurn() - t.NormalChiRefund())
 	gasCost.Mul(gasCost, gasPrice)
 
 	// Add chi cost.
@@ -68,7 +68,7 @@ func (t *TradeOption) MaxGasPrice() (*big.Int, error) {
 	profit.Sub(profit, chiCost)
 
 	// Gas usage.
-	gasCost := new(big.Int).SetUint64((t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) - t.NormalChiRefund())
+	gasCost := new(big.Int).SetUint64(t.NormalGasSpentWithBurn() - t.NormalChiRefund())
 
 	// Calculate max gas price.
 	profit.Div(profit, gasCost)
@@ -77,8 +77,8 @@ func (t *TradeOption) MaxGasPrice() (*big.Int, error) {
 
 // NormalChiRefund is the amount of gas that's going to get refunded.
 func (t *TradeOption) NormalChiRefund() uint64 {
-	// ~%46 refund
-	return (t.NormalGasSpent() + t.NormalGasTokenAmount()*10000) * 46 / 100
+	// ~%51 refund
+	return t.NormalGasSpentWithBurn() * 51 / 100
 }
 
 // NormalGasSpent returns the gas spent for the circle.
@@ -100,10 +100,18 @@ func (t *TradeOption) NormalGasSpent() uint64 {
 	gasSpent += uint64(len(t.Circle.Pairs) * 10000) // 5k gas each call.
 
 	// Transfer cost.
-	gasSpent += 29000
+	gasSpent += 21000
 
 	// Swap gas cost.
-	gasSpent += uint64(len(t.Circle.Pairs) * 70000) // 70K gas each swap.
+	for _, tokenAddr := range t.Circle.Path[:len(t.Circle.Path)-1] {
+		val, ok := variables.TargetTokens[tokenAddr]
+		if !ok {
+			panic("token info not found")
+		}
+
+		// Add buy transfer gas if it's not the first token.
+		gasSpent += val.SwapGas.Uint64()
+	}
 
 	// The burn tokens call.
 	gasSpent += 21000
@@ -115,6 +123,11 @@ func (t *TradeOption) NormalGasSpent() uint64 {
 func (t *TradeOption) NormalGasTokenAmount() uint64 {
 	gasTokens := uint64((t.NormalGasSpent() + 14154) / 41947)
 	return gasTokens
+}
+
+// NormalGasSpentWithBurn returns the gas spent with the gas tokens burnt.
+func (t *TradeOption) NormalGasSpentWithBurn() uint64 {
+	return t.NormalGasSpent() + t.NormalGasTokenAmount()*10000
 }
 
 func (t *TradeOption) GetJSON(gasPrice *big.Int) TradeOptionJSON {

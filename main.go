@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/brahma-adshonor/gohook"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -91,7 +92,7 @@ func main() {
 	}
 
 	// Load tokens.
-	variables.TargetTokens, variables.TokenNames, variables.TokenFees, err = addresses.LoadTokens(variables.ChainId)
+	variables.TargetTokenAddresses, variables.TargetTokens, err = addresses.LoadTokens(variables.ChainId)
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to import tokens.")
 	}
@@ -103,8 +104,9 @@ func main() {
 	}
 
 	// Get the hot tokens from the API.
-	for tmp := utils.UpdateHotTokens(); variables.IsDev == false && tmp == 0; {
-		logger.Log.WithField("tokenCount", tmp).Infoln("Hot tokens API is not ready yet! Waiting 1 min...")
+	_, err = utils.UpdateHotTokens()
+	for variables.IsDev == false && err != nil {
+		logger.Log.WithError(err).Infoln("Hot tokens API is not ready yet! Waiting 1 min...")
 		time.Sleep(1 * time.Minute)
 	}
 
@@ -145,13 +147,11 @@ func main() {
 			Tokens: struct {
 				MainAddress common.Address
 				Addresses   []common.Address
-				Symbols     map[common.Address]string
-				Fees        map[common.Address]*big.Int
+				Infos       map[common.Address]*variables.Token
 			}{
 				MainAddress: config.Parsed.Network.WETH,
-				Addresses:   variables.TargetTokens,
-				Symbols:     variables.TokenNames,
-				Fees:        variables.TokenFees,
+				Addresses:   variables.TargetTokenAddresses,
+				Infos:       variables.TargetTokens,
 			},
 			Multicaller: struct {
 				Address common.Address
@@ -189,7 +189,7 @@ func main() {
 	// Set onSort.
 	u.OnSort = onSort
 
-	logger.Log.WithField("tokenCount", len(variables.TokenNames)).Infoln("Loading pair information...")
+	logger.Log.WithField("tokenCount", len(variables.TargetTokenAddresses)).Infoln("Loading pair information...")
 
 	// Start listening.
 	err = u.Start()
@@ -208,6 +208,7 @@ func main() {
 func onSort(sortBlockNum *big.Int, options []*circle.TradeOption, gasPrices []*big.Int, sortTime time.Duration, u *updater.PairUpdater) {
 	// Check balance.
 	go checkBalance()
+	go checkChiBalance()
 
 	// broadcast ranks.
 	go func() {
@@ -234,7 +235,7 @@ func onSort(sortBlockNum *big.Int, options []*circle.TradeOption, gasPrices []*b
 
 	// Estimate circles.
 	// todo it is time to delete that maybe
-	if variables.IsDev {
+	if false && variables.IsDev {
 		go func() {
 			circleGases, _, errs := estimateCircles(options)
 			for i, _ := range circleGases {
@@ -387,7 +388,7 @@ func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int,
 	// Set transactor values.
 	transactor.GasPrice = gasPrice
 	transactor.Value = new(big.Int).Set(common.Big0)
-	transactor.GasLimit = tradeOption.NormalGasSpent() + tradeOption.NormalGasTokenAmount()*10000
+	transactor.GasLimit = tradeOption.NormalGasSpentWithBurn()
 	transactor.NoSend = true
 
 	// The parameter.
@@ -424,11 +425,6 @@ func triggerSwap(tradeOption *circle.TradeOption, lim *big.Int, profit *big.Int,
 
 // checkBalance checks the wallet balance and stops when too low.
 func checkBalance() {
-	// Return if dev.
-	if variables.IsDev {
-		return
-	}
-
 	// Get WETH balance.
 	balance, err := variables.EthClient.PendingBalanceAt(context.Background(), variables.Wallet.Address())
 	if balance.Cmp(utils.EthersToWei(config.Parsed.ArbitrageOptions.Limiters.StopBalance)) <= 0 {
@@ -436,5 +432,24 @@ func checkBalance() {
 	}
 	if err != nil {
 		logger.Log.WithError(err).Fatalln("Unable to get balance!")
+	}
+}
+
+// checkChiBalance check s the chi balance.
+func checkChiBalance() {
+	// Chi contract.
+	chiContract, err := abis.NewERC20(config.Parsed.Contracts.GasToken, variables.EthClient)
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to cast chi contract.")
+	}
+
+	// Balance of.
+	balance, err := chiContract.BalanceOf(&bind.CallOpts{}, variables.Wallet.Address())
+	if err != nil {
+		logger.Log.WithError(err).Fatalln("Unable to get chi balance.")
+	}
+
+	if balance.Cmp(common.Big0) <= 0 {
+		logger.Log.Fatalln("Low Chi balance!")
 	}
 }

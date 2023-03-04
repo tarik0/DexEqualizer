@@ -110,6 +110,11 @@ func (p *PairUpdater) findPairAddresses() error {
 	var contractAddresses = make([]common.Address, totalPairsSize)
 	for factoryIndex, pairIndex := 0, 0; factoryIndex < factoriesSize; factoryIndex += 1 {
 		for tmp := 0; tmp < pairsSize; tmp += 1 {
+			// Check empty address.
+			if bytes.EqualFold(p.Factories[factoryIndex].Bytes(), common.BigToAddress(common.Big0).Bytes()) {
+				panic("factory addresses are empty")
+			}
+
 			contractAddresses[pairIndex] = p.Factories[factoryIndex]
 			pairIndex += 1
 		}
@@ -127,6 +132,12 @@ func (p *PairUpdater) findPairAddresses() error {
 	for factoryIndex, pairIndex := 0, 0; factoryIndex < factoriesSize; factoryIndex += 1 {
 		for m := 0; m < len(p.params.Tokens.Addresses); m++ {
 			for n := m + 1; n < len(p.params.Tokens.Addresses); n++ {
+				// Check empty address.
+				if bytes.EqualFold(p.params.Tokens.Addresses[m].Bytes(), common.BigToAddress(common.Big0).Bytes()) ||
+					bytes.EqualFold(p.params.Tokens.Addresses[n].Bytes(), common.BigToAddress(common.Big0).Bytes()) {
+					panic("token addresses are empty")
+				}
+
 				functionArgs[pairIndex] = make([]interface{}, 2)
 				functionArgs[pairIndex][0] = p.params.Tokens.Addresses[m]
 				functionArgs[pairIndex][1] = p.params.Tokens.Addresses[n]
@@ -327,7 +338,7 @@ func (p *PairUpdater) findDecimals() error {
 //	Finds DFS circles.
 func (p *PairUpdater) findCircles() error {
 	// Get token symbol.
-	tempInSymbol, _ := p.params.Tokens.Symbols[p.params.Tokens.MainAddress]
+	tempInSymbol := p.params.Tokens.Infos[p.params.Tokens.MainAddress].Symbol
 
 	// DFS variables.
 	path := make([]common.Address, 1)
@@ -464,7 +475,7 @@ func (p *PairUpdater) compareAndSwapGasPrice(pairAddr common.Address, tx *types.
 
 // increaseTxGasPrice
 //	Increases the transaction's gas price and re-sends it again.
-func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.TradeOption, prevBlock *big.Int, targetGasPrice *big.Int) *types.Transaction {
+func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.TradeOption, prevBlock *big.Int, targetGasPrice *big.Int, hash common.Hash) *types.Transaction {
 	// Replace transaction.
 	replaceTransaction := types.NewTx(&types.LegacyTx{
 		Nonce:    tx.Nonce(),
@@ -494,7 +505,7 @@ func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.T
 
 	// Broadcast message.
 	err = variables.Hub.BroadcastMsg(
-		fmt.Sprintf("Transaction's gas price got updated! (%.3f Gwei)", utils.WeiToGwei(targetGasPrice)),
+		fmt.Sprintf("Transaction's gas price got updated! (%.3f Gwei) (%s)", utils.WeiToGwei(targetGasPrice), hash.String()),
 	)
 	if err != nil {
 		logger.Log.WithError(err).Errorln("Unable to broadcast message.")
@@ -505,7 +516,7 @@ func (p *PairUpdater) increaseTxGasPrice(tx *types.Transaction, option *circle.T
 
 // cancelTx
 //	Increases the transaction's gas price and replaces it with blank transaction.
-func (p *PairUpdater) cancelTx(tx *types.Transaction, option *circle.TradeOption, prevBlock *big.Int, targetGasPrice *big.Int) *types.Transaction {
+func (p *PairUpdater) cancelTx(tx *types.Transaction, option *circle.TradeOption, prevBlock *big.Int, targetGasPrice *big.Int, hash common.Hash) *types.Transaction {
 	walletAddr := variables.Wallet.Address()
 
 	// Blank transaction.
@@ -536,7 +547,7 @@ func (p *PairUpdater) cancelTx(tx *types.Transaction, option *circle.TradeOption
 	}
 
 	// Broadcast message.
-	err = variables.Hub.BroadcastMsg("Transaction got canceled because It's not profitable anymore!")
+	err = variables.Hub.BroadcastMsg(fmt.Sprintf("Transaction got canceled because It's not profitable anymore!, (%s)", hash.String()))
 	if err != nil {
 		logger.Log.WithError(err).Errorln("Unable to broadcast message.")
 	}
@@ -693,7 +704,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 		}
 
 		// Get token symbol.
-		tempOutSymbol, ok := u.params.Tokens.Symbols[tempOutToken]
+		tempOutInfo, ok := u.params.Tokens.Infos[tempOutToken]
 		if !ok {
 			panic("token symbol not found")
 		}
@@ -723,7 +734,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 
 			// Append new variables.
 			newPath = append(newPath, tempOutToken)
-			newPathSymbols = append(newPathSymbols, tempOutSymbol)
+			newPathSymbols = append(newPathSymbols, tempOutInfo.Symbol)
 			newRouteFees = append(newRouteFees, routeFee)
 			newRoute = append(newRoute, _pair.Address())
 			newRouteTokens = append(newRouteTokens, pairTokens)
@@ -773,7 +784,7 @@ func dfsUtilOnlyCircle(params DFSCircleParams, resultsCh chan *circle.Circle, mu
 			copy(newParams.RouteTokens, params.RouteTokens)
 
 			newParams.Path = append(newParams.Path, tempOutToken)
-			newParams.Symbols = append(newParams.Symbols, tempOutSymbol)
+			newParams.Symbols = append(newParams.Symbols, tempOutInfo.Symbol)
 			newParams.Route = append(params.Route, _pair.Address())
 			newParams.RouteFees = append(params.RouteFees, routeFee)
 			newParams.RouteTokens = append(params.RouteTokens, pairTokens)
@@ -823,7 +834,7 @@ func (p *PairUpdater) newBatchCall(
 	msg := map[string]interface{}{
 		"to":   p.params.Multicaller.Address.String(),
 		"data": fmt.Sprintf("0x%s", hex.EncodeToString(callBytes)),
-		"gas":  fmt.Sprintf("0x%x", 3_000_000),
+		"gas":  fmt.Sprintf("0x%x", 20_000_000),
 	}
 
 	// Response variables..
@@ -857,10 +868,10 @@ func (p *PairUpdater) multiCallBatch(
 
 	// Each call limits.
 	callGasUsage := 21_000
-	maxGasUsage := 3_000_000
+	maxGasUsage := 20_000_000
 
 	// The chunk size. (+1 to make sure)
-	chunkSize := (callGasUsage * len(contractAbis) / maxGasUsage) + 1
+	chunkSize := ((callGasUsage * len(contractAbis)) / maxGasUsage) + 1
 	chunkSize += 1 // to make sure gas limit is not exceeded.
 
 	// Split the chunk.
@@ -874,8 +885,6 @@ func (p *PairUpdater) multiCallBatch(
 		len(abiChunks) != len(nameChunks) ||
 		len(abiChunks) != len(argsChunks) ||
 		len(abiChunks) != chunkSize {
-
-		fmt.Println(len(abiChunks), len(addressChunks), len(nameChunks), len(argsChunks), chunkSize)
 		panic("something is wrong with the chunk sizes")
 	}
 
@@ -896,7 +905,7 @@ func (p *PairUpdater) multiCallBatch(
 	}
 
 	// Parse batch elements into chunks.
-	var chunkCount = (len(allBatchElements) / 2) + 1
+	var chunkCount = (len(allBatchElements) / 10) + 1
 	var batchElementChunks [][]rpc.BatchElem = chunkBy(allBatchElements, chunkCount)
 
 	// Wait group and channel.
@@ -918,8 +927,17 @@ func (p *PairUpdater) multiCallBatch(
 			// Batch call.
 			err = p.rpcBackend.BatchCallContext(context.Background(), chunk)
 			if err != nil {
-				logger.Log.WithError(err).Fatalln("Unable to batch call.")
+				logger.Log.
+					WithField("chunkIndex", index).
+					WithField("chunksSize", len(batchElementChunks)).
+					WithError(err).
+					Fatalln("Unable to batch call.")
 			}
+			logger.Log.
+				WithField("chunkIndex", index).
+				WithField("chunksSize", len(batchElementChunks)).
+				WithField("chunkSize", len(chunk)).
+				Debugln("Ok")
 
 			// Send to the channel.
 			ch <- struct {

@@ -13,13 +13,16 @@ import (
 
 // HotTokensResponse is the JSON struct from hot tokens response.
 type HotTokensResponse struct {
-	Count      int   `json:"count"`
-	LastUpdate int64 `json:"lastUpdate"`
-	Tokens     []struct {
-		Address common.Address `json:"address"`
-		Symbol  string         `json:"symbol"`
-		Usage   *big.Int       `json:"usage"`
-	} `json:"tokens"`
+	Count  int `json:"Count"`
+	Tokens []struct {
+		Symbol  string         `json:"Symbol"`
+		Address common.Address `json:"Address"`
+		BuyFee  *big.Int       `json:"BuyFee"`
+		SellFee *big.Int       `json:"SellFee"`
+		SwapGas *big.Int       `json:"SwapGas"`
+		Usage   *big.Int       `json:"Usage"`
+		Pairs   []string       `json:"Pairs"`
+	} `json:"Tokens"`
 }
 
 // hotTokensURL is the endpoint for hot tokens.
@@ -44,23 +47,42 @@ func GetHotTokens() (*HotTokensResponse, error) {
 }
 
 // UpdateHotTokens updates the tokens with API and returns how many tokens updated.
-func UpdateHotTokens() int {
+func UpdateHotTokens() (int, error) {
 	// Get hot tokens.
 	hotTokens, err := GetHotTokens()
 	if err != nil {
 		logger.Log.WithError(err).Errorln("Unable to get hot tokens from the API. You sure it is running ?")
-		return 0
+		return 0, err
+	}
+
+	// Check response.
+	if hotTokens.Count < 15 {
+		return 0, variables.APINotReady
+	}
+
+	// Check duplicates.
+	nonDupCount := 0
+	for _, hotToken := range hotTokens.Tokens {
+		if !slices.Contains(variables.TargetTokenAddresses, hotToken.Address) {
+			nonDupCount += 1
+		}
+	}
+	if nonDupCount < 15 {
+		return 0, variables.APINotReady
 	}
 
 	// Add hot tokens to all tokens.
-	updatedCount := 0
 	for _, hotToken := range hotTokens.Tokens {
-		if !slices.Contains(variables.TargetTokens, hotToken.Address) {
-			variables.TargetTokens = append(variables.TargetTokens, hotToken.Address)
-			variables.TokenNames[hotToken.Address] = hotToken.Symbol
-			variables.TokenFees[hotToken.Address] = new(big.Int).Set(variables.Big10000)
-			updatedCount += 1
+		if !slices.Contains(variables.TargetTokenAddresses, hotToken.Address) {
+			variables.TargetTokenAddresses = append(variables.TargetTokenAddresses, hotToken.Address)
+		}
+		variables.TargetTokens[hotToken.Address] = &variables.Token{
+			Address: hotToken.Address,
+			Symbol:  hotToken.Symbol,
+			BuyFee:  hotToken.BuyFee,
+			SellFee: hotToken.SellFee,
+			SwapGas: hotToken.SwapGas,
 		}
 	}
-	return updatedCount
+	return nonDupCount, nil
 }

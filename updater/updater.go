@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/tarik0/DexEqualizer/circle"
 	"github.com/tarik0/DexEqualizer/dexpair"
+	"github.com/tarik0/DexEqualizer/variables"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -103,8 +104,7 @@ type PairUpdaterParams struct {
 	Tokens struct {
 		MainAddress common.Address
 		Addresses   []common.Address
-		Symbols     map[common.Address]string
-		Fees        map[common.Address]*big.Int
+		Infos       map[common.Address]*variables.Token
 	}
 
 	// Multicaller information.

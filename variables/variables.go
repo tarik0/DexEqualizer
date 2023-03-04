@@ -22,9 +22,23 @@ var RouterFees map[common.Address]*big.Int
 
 // The token variables.
 
-var TargetTokens []common.Address
-var TokenNames map[common.Address]string
-var TokenFees map[common.Address]*big.Int
+// Token
+//	A basic structure to hold token information.
+type Token struct {
+	// Basic info.
+	Address common.Address
+	Symbol  string
+
+	// Fee infos.
+	BuyFee  *big.Int
+	SellFee *big.Int
+
+	// Gas infos.
+	SwapGas *big.Int
+}
+
+var TargetTokenAddresses []common.Address
+var TargetTokens map[common.Address]*Token
 
 // The network variables.
 
